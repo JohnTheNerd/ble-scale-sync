@@ -61,10 +61,16 @@ like, drives `height² / impedance` up until lean body mass exceeds body weight,
 and the result then pins the 4 % floor. Neither reads as an error; both silently
 move every derived metric.
 
-The raw impedance is still exported either way, so you can compare it against
-whatever your vendor app reports. If your scale publishes an impedance and your
-body fat still looks like a BMI estimate, that number is why, and it is worth
-opening an issue with it.
+A refused impedance is exported as 0, together with the estimate. The value the
+scale sent is in the log instead, on an info line:
+
+```
+Impedance 4317 Ohm is not a usable measurement (150-1200 Ohm), so body composition is the BMI estimate.
+```
+
+If your scale measures impedance and your body fat still looks like a BMI
+estimate, look for that line. The number in it is worth opening an issue with,
+together with what your vendor app reports.
 
 ### Body fat fallback (Deurenberg)
 
