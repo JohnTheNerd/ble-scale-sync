@@ -169,23 +169,17 @@ export const BleSchema = z
      */
     qn_protocol_byte: z.number().int().min(0).max(255).optional().nullable(),
     /**
-     * Payload byte of the QN A00D history-response frame, default 0xFE (#235,
-     * #75, #331).
+     * Slot mask of the QN A00D user-delete frame `a0 0d 04 <mask> 00 ...`
+     * (#461). Unset, the frame is not sent.
      *
-     * The handshake answers the scale's 0x21 config request with
-     * `a0 0d 04 <byte> 00 ...`. The default comes from openScale's QNHandler,
-     * which took it from an ES-30M capture. Two vendor-app captures on other
-     * firmware in the same family send 0xFC there instead: a GE CS 10 G (20-byte
-     * dialect) and an Arboleaf QN-Scale V39 (19-byte es26m), both from sessions
-     * that produced a reading in the vendor app while ble-scale-sync saw the
-     * handshake acknowledged and then silence.
-     *
-     * What the byte selects is NOT decoded. openScale annotates it only as
-     * "Payload", and it demonstrably does not gate the live 0x10 stream, since
-     * openScale receives those frames while sending 0xFE. So this ships as a
-     * setting rather than a changed default: on a scale that reads today, 0xFE
-     * is the value with evidence behind it, and a wrong choice here is silent in
-     * exactly the way `qn_protocol_byte` is.
+     * The handshake used to answer the scale's 0x21 config request with this
+     * frame on every QN scale (0xFE from openScale, 0xFC on the long dialects
+     * from vendor-app captures), read as a "history response". In the vendor's
+     * published SDK it is the command that deletes users from the scale, bit
+     * i-1 selecting slot i, and the scales confirm it as a successful delete.
+     * Set this only for a scale that stopped reporting once the frame was
+     * dropped, knowing the slots the mask selects are deleted on every
+     * connection (252 = slots 3 to 8, 254 = slots 2 to 8).
      */
     qn_report_byte: z.number().int().min(0).max(255).optional().nullable(),
     /**
@@ -198,8 +192,8 @@ export const BleSchema = z
      *
      * Set true on another dialect whose scale completes the whole handshake and
      * then streams nothing: it is the same class of silent failure as
-     * `qn_protocol_byte` and `qn_report_byte`, and the same kind of knob. Left
-     * unset it changes nothing.
+     * `qn_protocol_byte`, and the same kind of knob. Left unset it changes
+     * nothing.
      *
      * True also hands the scale the configured weight anchor: on the 20-byte
      * extended dialect in the ready-time A2, everywhere else as two A2 frames

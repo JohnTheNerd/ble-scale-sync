@@ -263,13 +263,11 @@ export interface AdapterRuntimeConfig {
    */
   qnProtocolByte?: number;
   /**
-   * Payload byte of the QN A00D history-response frame (`ble.qn_report_byte`).
-   *
-   * Defaults to 0xFE, the value openScale's ES-30M capture uses. Two vendor-app
-   * captures on other firmware in the family send 0xFC instead, from sessions
-   * that read successfully where this adapter saw the whole handshake
-   * acknowledged and then silence. What the byte selects is not decoded, so it
-   * is a setting rather than a changed default (#235, #75, #331).
+   * Slot mask of the QN A00D user-delete frame `a0 0d 04 <mask> ..`
+   * (`ble.qn_report_byte`). Unset, the frame is not sent at all; set, it is sent
+   * in every session with this mask, and the scale deletes the user slots the
+   * mask selects (bit i-1 = slot i). Opt-in only, for an install that stopped
+   * reporting without it (#461).
    */
   qnReportByte?: number;
   /**

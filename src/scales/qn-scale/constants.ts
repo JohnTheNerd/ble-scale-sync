@@ -34,7 +34,7 @@ import { uuid16 } from '../body-comp-helpers.js';
  *   0x12 (scale info) -> AE01 init (if AE00) -> 0x13 config
  *   0x14 (ready ACK)  -> 0x20 time sync + A2 user profile + "pass" auth
  *                        (no A2 on the 19-byte dialect with ble.qn_weight_ack)
- *   0x21 (config req)  -> A00D history responses + 0x22 start measurement
+ *   0x21 (config req)  -> A00D profile frame + 0x22 start measurement
  *   0x10 (weight)      -> parse weight + 0x1F acknowledge stable reading
  *
  * 0x10 frame (original format, 10 bytes):
@@ -162,57 +162,33 @@ export const CHR_SIG_WEIGHT_MEASUREMENT = uuid16(0x2a9d);
 export const SCALE_EPOCH_OFFSET = 946684800;
 
 /**
- * Payload byte of the A00D history-response frame sent in reply to the scale's
- * 0x21 config request: `a0 0d 04 <byte> 00 ...`.
+ * Sub-command of the A00D frame `a0 0d 04 <mask> 00 .. <checksum>`, which the
+ * handshake used to send in reply to every 0x21 config request (#461).
  *
- * 0xFE comes from openScale's QNHandler, which annotates it only as "Payload"
- * and took it from an ES-30M BLE capture. Two vendor-app captures on other
- * firmware in this family send 0xFC in the same position instead:
+ * It is not a history response. In the vendor's published Android SDK (qnsdkX
+ * 2.37.2) this exact frame, sub-command 0x04 with a bit mask at [3], is the
+ * command that DELETES USERS from the scale: bit i-1 set means slot i is
+ * deleted, so 0xFC clears slots 3 to 8 and 0xFE slots 2 to 8. The scale's
+ * answer `a1 .. 04 <mask> 01` is that command's success reply, and the scales
+ * in our logs send exactly that: #461 `a1 06 04 fc 01 a8`, #213, #253 and #75
+ * `a1 06 04 fe 01 aa`. The classic scale in #283 does not answer it at all.
  *
- *   #235  GE CS 10 G, 20-byte extended dialect
- *   #75   Arboleaf QN-Scale FW V39, 19-byte es26m dialect
+ * The bytes came from openScale (0xFE, from an ES-30M capture) and from
+ * vendor-app captures (0xFC on #235 and #75, 0xFE on #331). The vendor apps do
+ * send it, but in the SDK only with the slots an app asks to delete, which
+ * reads as an app removing users its account does not own (hypothesis). Sent
+ * blind with a fixed mask, it could delete other people's slots on a shared
+ * scale, together with any weigh-ins the scale still held for them.
  *
- * Both were taken from sessions where the vendor app completed a weigh-in while
- * this adapter saw the whole handshake acknowledged and then silence, and both
- * reporters reached the same reading of it independently: that the byte selects
- * between a live report stream and the stored-history path.
- *
- * That reading is NOT established, and the default therefore does not move.
- * openScale dispatches live 0x10 weight frames while sending 0xFE, so the byte
- * plainly does not gate the live stream on the firmware it was captured from,
- * and the 0x23 stored-record path this adapter relies on for V10 Renpho and
- * ES-CS20M firmware (#213) hangs off the same exchange. A wrong value here is
- * silent in exactly the way a wrong `qn_protocol_byte` is: every command is
- * acknowledged and no weight ever arrives. So `ble.qn_report_byte` exists to
- * let the reporters test 0xFC on their own hardware, and the default changes
- * only if that produces a reading.
+ * So it is no longer sent by default on any dialect: the SDK never sends it
+ * unless an app asks for a deletion, so the firmware cannot depend on it, and
+ * the classic scale ignores it. The byte it carried used to be read as
+ * selecting between a live stream and stored history; that reading is
+ * withdrawn, the captures that seemed to support it are the vendor apps
+ * deleting slots. `ble.qn_report_byte` still sends the frame with the given
+ * mask, for an install that worked with it and stops working without it.
  */
-export const REPORT_BYTE_DEFAULT = 0xfe;
-
-/**
- * Report byte for the LONG-FRAME dialects, es26m (18- or 19-byte) and extended
- * (20-byte). See #235 and #75.
- *
- * Unlike the default above, this one is not an inference. Two vendor-app
- * captures, on two scales, on both long dialects, agree:
- *
- *   extended  a raw HCI capture writes `a0 0d 04 fc ...` five times across
- *             three weigh-ins and never sends 0xFE. The scale acknowledges
- *             each one by echoing the byte back as `a1 07 04 fc 01 10 b9`,
- *             and 59 live 0x10 weight frames follow (#235).
- *   es26m     an Android btsnoop of a successful Arboleaf weigh-in sends the
- *             same frame. The reporter's own log line for that unit reads
- *             `QN: scale info (19B, dialect=es26m)`, so the dialect is not
- *             inferred from the model name (#75).
- *
- * So on the long dialects 0xFC is simply what the protocol uses.
- *
- * The 11-byte classic dialect keeps 0xFE. No capture covers it, and unlike the
- * long variants it reads today, which is exactly the asymmetry that decides it:
- * every scale reported silent after a completed handshake is on a long frame.
- * `ble.qn_report_byte` overrides either value if a unit disagrees.
- */
-export const REPORT_BYTE_LONG_FRAME = 0xfc;
+export const USER_DELETE_SUBCOMMAND = 0x04;
 
 /**
  * Grace period (ms) to wait for an impedance frame after the first stable

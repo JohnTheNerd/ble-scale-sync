@@ -108,7 +108,6 @@ ble:
   # force_scale_adapter: 'Hutbit'
   # session_timeout_sec: 20
   # qn_protocol_byte: 0
-  # qn_report_byte: 252
 ```
 
 | Field                        | Required                    | Default        | Description                                                                                                                                                                                                                                                                                                                                                                                             |
@@ -121,7 +120,7 @@ ble:
 | `force_scale_adapter`        | No                          | Auto-detect    | Name of the scale protocol adapter to use, bypassing auto-detection. Requires `scale_mac`. See below.                                                                                                                                                                                                                                                                                                   |
 | `session_timeout_sec`        | No                          | `120`          | Seconds of scale silence that end a GATT session (5 to 600); an inbound frame restarts the clock. A session also ends after three times this value even if frames keep arriving, so a chatty scale cannot hold the radio forever, and a whole scan cycle is capped at 15 minutes regardless. Native BLE handlers only; ignored on `mqtt-proxy` and `esphome-proxy`. See below.                          |
 | `qn_protocol_byte`           | No                          | Auto           | QN-family scales only. Protocol byte the handshake echoes back to the scale (0 to 255). Set it when a QN scale runs the whole handshake and then reports nothing, or when its scale-info frame is lost in transit on a proxy transport. See below.                                                                                                                                                      |
-| `qn_report_byte`             | No                          | Per dialect    | QN-family scales only. Payload byte of the history-response frame (0 to 255). Defaults to `252` (0xFC) on the long-frame dialects (es26m and extended) and `254` (0xFE) on the classic one. Try the other value if your scale completes the handshake and then reports nothing. See below.                                                                                                              |
+| `qn_report_byte`             | No                          | Unset          | QN-family scales only. Opt-in, and it deletes data on the scale: sends the frame that deletes the user slots this byte selects (0 to 255), on every connection. Unset, nothing is sent. Only for a scale that stopped reporting without it. See below.                                                                                                                                                  |
 | `auto_clear_stale_bond`      | No                          | `false`        | Delete a pairing key the scale has forgotten and pair again. Bonded scales only (Beurer BF7xx / BF9xx), node-ble transport only. See below.                                                                                                                                                                                                                                                             |
 | `preemptive_adapter_reset`   | No                          | `true`         | Power-cycle the Bluetooth adapter with `btmgmt` after every GATT session, to clear a stuck-discovery state some Raspberry Pi adapters fall into. It was not the cause of the Beurer BF915 re-pairing in #417 (see `adapter_privacy`). node-ble transport only. See below.                                                                                                                               |
 | `adapter_privacy`            | No                          | `false`        | Turn on LE privacy on the Bluetooth adapter, with a key derived from its address, so pairing hands the scale a host identity key. For Beurer scales that ask for SET and a new pairing before every weigh-in. Affects the whole adapter. node-ble transport only. See below.                                                                                                                            |
@@ -177,38 +176,34 @@ If a value makes your scale work, please say so in an issue with the model and t
 
 :::
 
-::: tip QN scales that still report nothing (`qn_report_byte`)
+::: warning `qn_report_byte` deletes users on the scale
 
-If `qn_protocol_byte` did not help, there is one more byte worth trying, and it is a separate one.
-
-When the scale asks for its configuration (`0x21`), the handshake answers with a history-response frame:
+Up to v1.31.0 the handshake answered the scale's configuration request (`0x21`) with this frame on every QN-family scale:
 
 ```
-a0 0d 04 fe 00 00 00 00 00 00 00 00 <checksum>
-                ^^
+a0 0d 04 fc 00 00 00 00 00 00 00 00 <checksum>
+         ^^
 ```
 
-That `fe` comes from openScale, which took it from a capture of an ES-30M and labels it only as a payload byte.
+It came from openScale, which calls it a payload, and from vendor-app captures, and it was read as choosing between live weight and stored history. That reading was wrong. In the vendor's published SDK this frame is the command that deletes users from the scale: each bit of that byte selects a user slot (bit 0 is slot 1), so `fc` (252) deletes slots 3 to 8 and `fe` (254) slots 2 to 8, and the scales that answer it report a successful delete. On a scale shared with people who use the vendor app, that can remove their user slots, and possibly weigh-ins the scale was still holding for them.
 
-On the **long-frame dialects**, es26m (18- or 19-byte) and extended (20-byte), the default is `fc`, and that one is not an inference. Two vendor-app captures on two different scales agree: one writes `a0 0d 04 fc ...` five times across three weigh-ins and never sends `fe`, with the scale echoing the byte back and 59 live weight frames following; the other is an Android capture of a successful weigh-in on a unit whose own log line reads `dialect=es26m`.
+The frame is no longer sent. The vendor's SDK does not send it unless an app asks for a deletion, so a scale should not need it.
 
-The 11-byte **classic** dialect keeps `fe`. No capture covers it, and unlike the long variants it reads today, which is what decides it: every scale reported silent after a completed handshake has been on a long frame.
-
-What the byte actually selects is still not known. Reporters read it as choosing between a live weight stream and the stored-history path, which fits their symptoms, but openScale receives live weight frames while sending `fe`, so that reading cannot be the whole story. If your scale is on another dialect and goes quiet after the handshake, `fc` is the value to try:
+`qn_report_byte` still sends it, with the value you set as the slot mask, on every connection. Set it only if your scale reported weights before this change and stopped after it, and only if no one else's data is on the scale:
 
 ```yaml
 ble:
-  qn_report_byte: 252 # 0xFC, the value both vendor-app captures send
+  qn_report_byte: 252 # deletes slots 3 to 8 on every connection
 ```
 
-With debug logging on, every session says which byte it used and why:
+The log warns at startup while it is set, and with debug logging on every session says what it did:
 
 ```
-QN: history response byte 0xfc (dialect default)
-QN: history response byte 0xfe (forced; dialect default 0xfc)
+QN: A00D user-delete frame not sent (ble.qn_report_byte unset, #461)
+QN: sending the A00D user-delete frame with mask 0xfc (ble.qn_report_byte, #461)
 ```
 
-If `252` makes your scale produce a weight, please say so in an issue with the model, the dialect from the `QN: scale info` line and that log line. Two confirmations on different firmware would be enough to move the default.
+If your scale needs it, please open an issue with the model and the `QN: scale info` line, so the reason can be found and the setting removed.
 
 :::
 
@@ -229,7 +224,7 @@ There is a second place the same frame appears, and it is the more interesting o
 
 That default is not changed, because openScale's bytes are what every QN scale in the registry reads with today and two silent units are not enough to move it under the whole family. On the 20-byte extended dialect, turning this on swaps in your configured weight anchor there too. On the 19-byte dialect it drops that frame, since the Arboleaf app sends nothing like it before the start command. On the other dialects that frame stays as it is. Everywhere except the 20-byte dialect the anchor goes after the start command instead (see below).
 
-If your scale completes the whole handshake, is accepted on `qn_protocol_byte` and `qn_report_byte`, and then goes quiet, this is the next thing to try:
+If your scale completes the whole handshake, is accepted on `qn_protocol_byte`, and then goes quiet, this is the next thing to try:
 
 ```yaml
 ble:

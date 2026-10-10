@@ -1627,50 +1627,88 @@ describe('AE02 dispatch (#75, #235)', () => {
       expect(config).toEqual([0x13, 0x09, 0xff, 0x01, 0x10, 0x00, 0x00, 0x00, 0x2c]);
     });
 
-    // The A00D history-response pair had no coverage at all before #235/#75
-    // put its payload byte in question, so these pin both the default and the
-    // override.
-    // A vendor-app capture of this dialect writes 0xFC five times across three
-    // weigh-ins, never 0xFE, the scale echoes it back as `a1 07 04 fc 01 10 b9`,
-    // and 59 live 0x10 frames follow (#235).
-    // The 19-byte es26m dialect gets the same byte, from the #75 capture. The
-    // reporter's own log names the dialect, so this is not inferred from a model.
-    it('sends the A00D history response with 0xFC on the es26m dialect', async () => {
-      const adapter = makeAdapter();
-      // 19-byte 0x12: long-frame variant, not the 20-byte extended one.
-      const info = Buffer.alloc(19);
-      info[0] = 0x12;
-      info[1] = 0x13;
-      info[2] = 0xff;
-      info[10] = 0;
-      const writes = await driveHandshake(adapter, info);
-      const msg1 = writes.find((w) => w[0] === 0xa0 && w[2] === 0x04);
-      expect(msg1).toBeDefined();
-      expect(msg1![3]).toBe(0xfc);
-      expect(msg1![12]).toBe(msg1!.slice(0, 12).reduce((a, b) => a + b, 0) & 0xff);
-    });
+    // `a0 0d 04 <mask> ..`, sent on 0x21 since openScale's port and read as a
+    // "history response", is the user-delete command in the vendor's published
+    // SDK, and the scales answer it as a successful delete (#461 `a1 06 04 fc 01
+    // a8`). No dialect gets it by default any more; the A00D profile frame and
+    // START still follow the 0x21.
+    describe('A00D user-delete frame (#461)', () => {
+      /** Real 0x12 frames from the logs, one per dialect. */
+      const DIALECT_INFO: [string, Buffer][] = [
+        // #283, classic (17 bytes, `[1]` 0x11)
+        [
+          'classic',
+          Buffer.from([
+            0x12, 0x11, 0xff, 0xd3, 0x60, 0x18, 0x00, 0x01, 0xfb, 0x0a, 0x03, 0x19, 0x00, 0x04,
+            0x05, 0x07, 0x9f,
+          ]),
+        ],
+        // #461 Physiq, es26m (18 bytes)
+        [
+          'es26m 18-byte',
+          Buffer.from([
+            0x12, 0x12, 0xff, 0x25, 0xe0, 0x16, 0x00, 0x05, 0xff, 0x13, 0x07, 0x16, 0x00, 0x00,
+            0x05, 0x9f, 0x32, 0x48,
+          ]),
+        ],
+        ['extended 20-byte', makeExtendedScaleInfo()],
+      ];
 
-    it('sends the A00D history response with 0xFC on the extended dialect', async () => {
-      const adapter = makeAdapter();
-      const writes = await driveHandshake(adapter, makeExtendedScaleInfo());
-      const msg1 = writes.find((w) => w[0] === 0xa0 && w[2] === 0x04);
-      expect(msg1).toBeDefined();
-      expect(msg1![3]).toBe(0xfc);
-      expect(msg1![12]).toBe(msg1!.slice(0, 12).reduce((a, b) => a + b, 0) & 0xff);
-    });
+      it.each(DIALECT_INFO)('sends none on the %s dialect by default', async (_name, info) => {
+        const adapter = makeAdapter();
+        const writes = await driveHandshake(adapter, info);
+        expect(writes.some((w) => w[0] === 0xa0 && w[2] === 0x04)).toBe(false);
+        // The rest of the 0x21 answer is unchanged.
+        expect(writes.some((w) => w[0] === 0xa0 && w[2] === 0x02)).toBe(true);
+        expect(writes.some((w) => w[0] === 0x22)).toBe(true);
+      });
 
-    // Everything that is not the captured firmware keeps the value it reads on
-    // today. The capture covers one dialect and says nothing about the others.
-    it('leaves the classic dialect on 0xFE', async () => {
-      const adapter = makeAdapter();
-      const info = Buffer.alloc(11);
-      info[0] = 0x12;
-      info[2] = 0xab;
-      info[10] = 1;
-      const writes = await driveHandshake(adapter, info);
-      const msg1 = writes.find((w) => w[0] === 0xa0 && w[2] === 0x04);
-      expect(msg1![3]).toBe(0xfe);
-      expect(msg1![12]).toBe(msg1!.slice(0, 12).reduce((a, b) => a + b, 0) & 0xff);
+      it('sends none on the no-0x12 fallback handshake either', async () => {
+        vi.useFakeTimers();
+        try {
+          const adapter = makeAdapter();
+          const writes: number[][] = [];
+          const ctx = {
+            write: async (_uuid: string, data: Buffer | number[]) => {
+              writes.push([...data]);
+            },
+            read: async () => Buffer.alloc(0),
+            subscribe: async () => {},
+            profile: defaultProfile(),
+            deviceAddress: '',
+            availableChars: new Set<string>(),
+          } as unknown as ConnectionContext;
+          adapter.onSessionStart?.();
+          await adapter.onConnected(ctx);
+          await vi.advanceTimersByTimeAsync(6000);
+          expect(writes.some((w) => w[0] === 0x22)).toBe(true);
+          expect(writes.some((w) => w[0] === 0xa0 && w[2] === 0x04)).toBe(false);
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it('keeps the profile frame 200 ms after the 0x21, where it was', async () => {
+        const adapter = makeAdapter();
+        const timed: TimedWrite[] = [];
+        await driveHandshake(adapter, makeExtendedScaleInfo(), defaultProfile(), { timed });
+        const start = timed[0].at;
+        const profile = timed.find((w) => w.data[0] === 0xa0 && w.data[2] === 0x02);
+        expect(profile!.at - start).toBe(200);
+      });
+
+      it('warns when ble.qn_report_byte opts back in', () => {
+        const warn = vi.spyOn(bleLog, 'warn').mockImplementation(() => {});
+        try {
+          makeAdapter().configure({ qnReportByte: 0xfc });
+          expect(warn).toHaveBeenCalledWith(expect.stringContaining('deletes the user slots'));
+          warn.mockClear();
+          makeAdapter().configure({});
+          expect(warn).not.toHaveBeenCalled();
+        } finally {
+          warn.mockRestore();
+        }
+      });
     });
 
     it('applies ble.qn_report_byte to the A00D payload byte and recomputes the checksum', async () => {
@@ -2298,7 +2336,7 @@ describe('AE02 dispatch (#75, #235)', () => {
     });
 
     // The same binding for every other step that sleeps between writes: the
-    // A00D pair and START here, the 0x13 config after the AE01 init, and the
+    // A00D profile frame and START here, the 0x13 config after the AE01 init, and the
     // whole fallback handshake below. Default config, no opt-ins.
     it('does not hand a reconnected session the previous session A00D or START', async () => {
       const adapter = makeAdapter();
@@ -2322,10 +2360,12 @@ describe('AE02 dispatch (#75, #235)', () => {
         adapter.parseNotification(ARBOLEAF_2A_INFO);
         adapter.parseNotification(ARBOLEAF_2A_READY);
         adapter.parseNotification(ARBOLEAF_2A_CONFIG_REQ);
-        // The first A00D is out; the second, the 0x13 config and START are
-        // still sleeping when the session ends.
+        // The time sync is out; the A00D profile frame and START are still
+        // sleeping when the session ends (no user-delete frame by default,
+        // #461, so the 200 ms before the profile frame is what is pending).
         await vi.advanceTimersByTimeAsync(100);
-        expect(first.some((w) => w[0] === 0xa0 && w[2] === 0x04)).toBe(true);
+        expect(first.some((w) => w[0] === 0x20)).toBe(true);
+        expect(first.some((w) => w[0] === 0xa0)).toBe(false);
         adapter.onSessionEnd!();
         adapter.onSessionStart?.();
         await adapter.onConnected(makeCtx(second));

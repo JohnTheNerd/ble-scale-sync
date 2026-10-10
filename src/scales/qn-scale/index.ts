@@ -45,8 +45,6 @@ import {
   NINETEEN_BYTE_RESULT_HOLD_MS,
   POST_START_ANCHOR_DELAY_MS,
   PROTO_ECHO_MIN_INFO_FRAME_LEN,
-  REPORT_BYTE_DEFAULT,
-  REPORT_BYTE_LONG_FRAME,
   RESULT16_FRAME_LEN,
   RESULT16_OPCODE_COMPOSITION,
   RESULT16_OPCODE_DONE,
@@ -60,6 +58,7 @@ import {
   TRIGGER_GAP_MS,
   TRIGGER_REPEATS,
   TRIGGER_WEIGHT_FALLBACK_KG,
+  USER_DELETE_SUBCOMMAND,
   WEIGHT_CERTAIN_MAX_KG,
   WEIGHT_CERTAIN_MIN_KG,
 } from './constants.js';
@@ -243,8 +242,8 @@ export class QnScaleAdapter
   private forcedProtocolType: number | null = null;
 
   /**
-   * Payload byte of the A00D history-response frame, forced by
-   * `ble.qn_report_byte` (#235, #75, #331). Null leaves REPORT_BYTE_DEFAULT.
+   * Slot mask of the A00D user-delete frame, set by `ble.qn_report_byte`. Null
+   * (the default) sends no such frame at all; see USER_DELETE_SUBCOMMAND (#461).
    */
   private forcedReportByte: number | null = null;
 
@@ -355,6 +354,13 @@ export class QnScaleAdapter
     if (opts.displayUnit) this.displayUnit = opts.displayUnit;
     this.forcedProtocolType = opts.qnProtocolByte ?? null;
     this.forcedReportByte = opts.qnReportByte ?? null;
+    if (this.forcedReportByte !== null) {
+      bleLog.warn(
+        `QN: ble.qn_report_byte is set (${this.forcedReportByte}), so every QN session sends ` +
+          'the frame that deletes the user slots its bits select on the scale. Remove the ' +
+          'setting unless your scale stopped reporting without it (#461).',
+      );
+    }
     this.forcedWeightAck = opts.qnWeightAck ?? null;
     this.a4PreludeEnabled = opts.qnA4Prelude === true;
     this.timeSyncLong = opts.qnTimeSyncLong === true;
@@ -706,7 +712,7 @@ export class QnScaleAdapter
    *   0x12 (scale info) -> AE01 init + 0x13 config with echoed protocol type
    *   0x14 (ready ACK)  -> 0x20 time sync + A2 user profile + "pass" auth
    *                        (no A2 on the 19-byte dialect with ble.qn_weight_ack)
-   *   0x21 (config req)  -> A00D history responses + 0x22 start
+   *   0x21 (config req)  -> A00D profile frame + 0x22 start
    *   0x10 (weight)      -> parse weight (original or ES-30M format)
    *                        (19-byte dialect: 20-byte stream, weight held until
    *                        its 0x16, nothing written back, D037)
@@ -798,9 +804,9 @@ export class QnScaleAdapter
       return null;
     }
 
-    // 0x21: config request, respond with A00D history frames + start measurement
+    // 0x21: config request, respond with the A00D profile frame + start measurement
     if (opcode === 0x21) {
-      bleLog.debug('QN: config request, sending history response + start');
+      bleLog.debug('QN: config request, sending the profile frame + start');
       void this.handleConfigRequest();
       return null;
     }
@@ -1381,7 +1387,7 @@ export class QnScaleAdapter
     await this.writeAe01([0x02, 0x70, 0x61, 0x73, 0x73]);
   }
 
-  /** Respond to 0x21 (config request) with A00D history frames + 0x22 start measurement. */
+  /** Respond to 0x21 (config request) with the A00D profile frame + 0x22 start measurement. */
   private async handleConfigRequest(): Promise<void> {
     if (this.historyResponseSent) return;
     this.historyResponseSent = true;
@@ -1394,34 +1400,35 @@ export class QnScaleAdapter
     const gen = this.sessionGeneration;
     const live = (): boolean => gen === this.sessionGeneration;
 
-    // A00D response 1 (from openScale QNHandler). byte[3] is the payload byte
-    // `ble.qn_report_byte` overrides; see REPORT_BYTE_DEFAULT and
-    // REPORT_BYTE_LONG_FRAME.
-    const isLongFrame = this.isExtendedLongFrame || this.isLongFrameVariant;
-    const dialectDefault = isLongFrame ? REPORT_BYTE_LONG_FRAME : REPORT_BYTE_DEFAULT;
-    const msg1 = [
-      0xa0,
-      0x0d,
-      0x04,
-      this.forcedReportByte ?? dialectDefault,
-      0x00,
-      0x00,
-      0x00,
-      0x00,
-      0x00,
-      0x00,
-      0x00,
-      0x00,
-      0x00,
-    ];
-    msg1[12] = msg1.reduce((a, b) => a + b, 0) & 0xff;
-    bleLog.debug(
-      `QN: history response byte 0x${msg1[3].toString(16).padStart(2, '0')}` +
-        (this.forcedReportByte !== null
-          ? ` (forced; dialect default 0x${dialectDefault.toString(16)})`
-          : ` (dialect default)`),
-    );
-    await this.writeCmd(msg1);
+    // The A00D user-delete frame (openScale's "history response") goes out only
+    // when `ble.qn_report_byte` asks for it, with that byte as the slot mask;
+    // see USER_DELETE_SUBCOMMAND (#461). The 200 ms that followed it stays, so
+    // nothing else in the sequence moves in time.
+    if (this.forcedReportByte !== null) {
+      const deleteUsers = [
+        0xa0,
+        0x0d,
+        USER_DELETE_SUBCOMMAND,
+        this.forcedReportByte,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+      ];
+      deleteUsers[12] = deleteUsers.reduce((a, b) => a + b, 0) & 0xff;
+      bleLog.debug(
+        `QN: sending the A00D user-delete frame with mask ` +
+          `0x${this.forcedReportByte.toString(16).padStart(2, '0')} (ble.qn_report_byte, #461)`,
+      );
+      await this.writeCmd(deleteUsers);
+    } else {
+      bleLog.debug('QN: A00D user-delete frame not sent (ble.qn_report_byte unset, #461)');
+    }
 
     await wait(200);
     if (!live()) return;

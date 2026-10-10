@@ -37,17 +37,18 @@ configuration:
       in the log and then never reports a weight. Then try 0, or 255, or the
       value the "QN: scale info" log line shows as proto. Accepts 0 to 255.
   qn_report_byte:
-    name: QN history response byte
+    name: QN user-delete mask (deletes data)
     description: >-
-      QN-family scales only, and only worth trying after the QN protocol byte
-      did not help. Try 252, which is what vendor-app captures of a GE CS 10 G
-      and an Arboleaf QN-Scale send where this add-on sends the default 254.
-      Accepts 0 to 255.
+      QN-family scales only. Leave empty. When set, every connection sends the
+      command that deletes the user slots this value selects on the scale
+      (252 deletes slots 3 to 8), which can remove other people's users and
+      stored weigh-ins. Set it only if your scale stopped reporting when this
+      command was dropped. Accepts 0 to 255.
   qn_weight_ack:
     name: QN weight acknowledgement
     description: >-
-      QN-family scales only, and the last thing to try after the two QN bytes
-      above. Sends your weight anchor (last known weight, or the middle of
+      QN-family scales only, and the last thing to try after the QN protocol
+      byte above. Sends your weight anchor (last known weight, or the middle of
       your weight range) twice right after the start command, as the
       Arboleaf vendor app does, and acknowledges live weight frames with their
       own weight. On the 19-byte Arboleaf dialect it also sends your age and
@@ -58,8 +59,8 @@ configuration:
   qn_a4_prelude:
     name: QN A4 prelude
     description: >-
-      QN-family scales only, and the last thing to try after the two QN bytes
-      and the weight acknowledgement. An HCI capture of an Arboleaf vendor app
+      QN-family scales only, and the last thing to try after the QN protocol
+      byte and the weight acknowledgement. An HCI capture of an Arboleaf vendor app
       shows two undecoded 0xA4 frames sent between the start command and the
       first weight frame, which this add-on does not send. Set true to replay
       them. The payload is one reporter's own bytes, so it may help your unit
