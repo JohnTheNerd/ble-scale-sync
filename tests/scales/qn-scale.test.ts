@@ -3693,6 +3693,9 @@ describe('QN stored record and impedance (#461)', () => {
     });
 
     it('treats an unscrambled 0xffff as no contact', async () => {
+      // Synthetic: the #253 frame with R50 overwritten (checksum left stale,
+      // this branch does not check it). No scale in our logs sent 0xffff; the
+      // 60000 cut-off is the vendor SDK's.
       const noContact = Buffer.from(LIVE_253);
       noContact.writeUInt16BE(0xffff, 7);
       const reading = await runSession(makeAdapter(), [INFO_253, noContact], {
