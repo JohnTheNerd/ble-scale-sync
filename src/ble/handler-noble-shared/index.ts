@@ -225,6 +225,7 @@ export function createNobleHandler({ noble, getState }: NobleHandlerDeps) {
                 scaleAuth,
                 onActivity,
                 peripheral.advertisement?.localName,
+                parseMfgData(peripheral.advertisement?.manufacturerData),
               ),
             readingTimeoutMs ?? RAW_READING_TIMEOUT_MS,
             'Timed out waiting for a complete scale reading',

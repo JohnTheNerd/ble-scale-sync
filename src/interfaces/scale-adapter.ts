@@ -206,6 +206,14 @@ export interface ConnectionContext {
    */
   deviceName?: string;
   /**
+   * Manufacturer data of the advertisement the transport matched the device on,
+   * in the same shape as `BleDeviceInfo.manufacturerData` (company id apart,
+   * `data` without it). Absent when the transport had none. Lets an adapter
+   * read per-unit flags a scale only announces there, e.g. the QN impedance
+   * encoding (#461).
+   */
+  manufacturerData?: { id: number; data: Buffer };
+  /**
    * Set of characteristic UUIDs (normalized 32-char hex, lowercase) that were
    * actually discovered on the connected device. Adapters with `optional`
    * bindings can use this to detect firmware variants and switch behavior.

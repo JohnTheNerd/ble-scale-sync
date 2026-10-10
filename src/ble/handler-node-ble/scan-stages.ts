@@ -581,6 +581,8 @@ export async function readWithTimeouts(
     abortSignal?: AbortSignal;
     /** Advertised name, handed to the adapter as ConnectionContext.deviceName. */
     deviceName?: string;
+    /** Advertised manufacturer data, handed on as ConnectionContext.manufacturerData. */
+    manufacturerData?: { id: number; data: Buffer };
   },
 ): Promise<RawReading> {
   const idleMs = opts.readingTimeoutMs ?? RAW_READING_TIMEOUT_MS;
@@ -610,6 +612,7 @@ export async function readWithTimeouts(
                 onActivity(minIdleMs);
               },
               opts.deviceName,
+              opts.manufacturerData,
             ),
           idleMs,
           'Timed out waiting for a complete scale reading',

@@ -343,6 +343,9 @@ export async function scanAndReadRaw(opts: ScanOptions): Promise<RawReading> {
     let matchedAdapter: ScaleAdapter;
     // Advertised name, for adapters whose protocol differs by model.
     let deviceName = '';
+    // Advertised manufacturer data, for adapters that read per-unit flags from
+    // it (#461). Captured before StopDiscovery, which can drop it (#297).
+    let manufacturerData: { id: number; data: Buffer } | undefined;
 
     if (targetMac) {
       const mac = formatMac(targetMac);
@@ -357,6 +360,7 @@ export async function scanAndReadRaw(opts: ScanOptions): Promise<RawReading> {
         adapters,
       );
       deviceName = name;
+      manufacturerData = advert.manufacturerData;
 
       if (
         preMatchedAdapter?.preferPassive &&
@@ -427,7 +431,10 @@ export async function scanAndReadRaw(opts: ScanOptions): Promise<RawReading> {
       matchedAdapter = result.adapter;
       deviceMac = result.mac;
       deviceName = result.name;
-      await logAdvertisementSnapshot(device);
+      // The fresher snapshot first; a name-only match may have had none yet
+      // (ADV_IND and SCAN_RSP arrive apart), then the one it matched on.
+      const snapshot = await logAdvertisementSnapshot(device);
+      manufacturerData = snapshot.manufacturerData ?? result.manufacturerData;
 
       // Passive-mode adapters: read from advertisements without connecting.
       if (
@@ -494,6 +501,7 @@ export async function scanAndReadRaw(opts: ScanOptions): Promise<RawReading> {
       readingTimeoutMs,
       abortSignal,
       deviceName,
+      manufacturerData,
     });
     gattSucceeded = true;
     resetScanActivityBackoff();

@@ -12,6 +12,7 @@ import {
 } from '../advertisement.js';
 import { bleLog, errMsg, withIdleTimeout, IMPEDANCE_GRACE_MS } from '../types.js';
 import { EsphomeProxyPool } from './pool.js';
+import { ManufacturerDataCache } from './advert.js';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -136,12 +137,15 @@ export async function scanAndReadRaw(opts: ScanOptions): Promise<RawReading> {
         // is remembered and merged back in. Same reasoning as the watcher.
         const lastAdvertName = new Map<string, string>();
         const MAX_CACHED_NAMES = 64;
+        // For the GATT handoff only, never the match (see ManufacturerDataCache).
+        const mfgCache = new ManufacturerDataCache();
 
         sub.unsub = pool.onAdvertisement((rawInfo, address) => {
           const addrLc = address.toLowerCase();
           if (targetLc && addrLc !== targetLc) return;
 
           logAdvert(address, rawInfo);
+          mfgCache.remember(rawInfo, addrLc);
           let info = rawInfo;
           if (info.localName) {
             if (lastAdvertName.size >= MAX_CACHED_NAMES && !lastAdvertName.has(addrLc)) {
@@ -210,6 +214,7 @@ export async function scanAndReadRaw(opts: ScanOptions): Promise<RawReading> {
           if (gattInFlight.has(addrLc)) return;
           gattInFlight.add(addrLc);
           bleLog.info(`Matched: ${adapter.name} (${address}); opening GATT via ESPHome proxy`);
+          const manufacturerData = mfgCache.forSession(info, addrLc);
           void (async () => {
             let session: Awaited<ReturnType<typeof pool.connectGatt>> | null = null;
             try {
@@ -227,6 +232,7 @@ export async function scanAndReadRaw(opts: ScanOptions): Promise<RawReading> {
                     opts.scaleAuth,
                     onActivity,
                     info.localName,
+                    manufacturerData,
                   ),
                 GATT_READING_IDLE_MS,
                 `GATT reading timeout for ${address}`,

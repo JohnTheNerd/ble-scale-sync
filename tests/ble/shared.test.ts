@@ -484,6 +484,46 @@ describe('waitForReading() — onConnected mode', () => {
     expect(seen[0]).toBe('013197A1');
   });
 
+  // #461: the advertisement the transport matched on, for adapters that read
+  // per-unit flags from it. The bytes are the #461 Physiq advertisement.
+  it('hands the advertised manufacturer data to onConnected as ConnectionContext.manufacturerData', async () => {
+    const mfg = { id: 0xffff, data: Buffer.from('081401000025e0160005ff6108010015', 'hex') };
+    const run = async (manufacturerData?: {
+      id: number;
+      data: Buffer;
+    }): Promise<ConnectionContext> => {
+      const notifyChar = createMockChar();
+      const { charMap } = createCharMap([[NOTIFY_UUID, notifyChar]]);
+      const seen: ConnectionContext[] = [];
+      const adapter = createLegacyAdapter({
+        characteristics: [{ uuid: NOTIFY_UUID, type: 'notify' }],
+        onConnected: vi.fn(async (ctx: ConnectionContext) => {
+          seen.push(ctx);
+        }),
+        parseNotification: vi.fn(() => ({ weight: 75, impedance: 500 })),
+      });
+      const promise = waitForRawReading(
+        charMap,
+        createMockDevice(),
+        adapter,
+        PROFILE,
+        '',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        'QN-Scale',
+        manufacturerData,
+      );
+      await vi.waitFor(() => expect(seen).toHaveLength(1));
+      notifyChar.triggerData(Buffer.from([0x01]));
+      await promise;
+      return seen[0];
+    };
+    expect((await run(mfg)).manufacturerData).toBe(mfg);
+    expect('manufacturerData' in (await run())).toBe(false);
+  });
+
   it('ConnectionContext.write sends data to the correct characteristic', async () => {
     const notifyChar = createMockChar();
     const writeChar = createMockChar();

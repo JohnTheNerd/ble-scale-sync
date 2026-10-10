@@ -276,3 +276,65 @@ describe('ReadingWatcher config: weight unit, PIN removal, device name', () => {
     await watcher.stop();
   });
 });
+
+// #461: the proxy delivers the advertisement and its scan response as two
+// events, and the one that matches (named) need not carry the manufacturer
+// data. The bytes are the #461 Physiq advertisement (node-ble log); the split
+// into a nameless event with them and a named one without is synthetic.
+describe('ReadingWatcher manufacturer data handoff (#461)', () => {
+  type Pool = { emitAdvert: (info: BleDeviceInfo, mac: string) => void };
+  const poolOf = (w: unknown): Pool => (w as { pool: Pool }).pool;
+  const MFG_461 = {
+    id: 0xffff,
+    data: Buffer.from('081401000025e0160005ff6108010015', 'hex'),
+  };
+  const MAC = 'FF:05:00:16:E0:25';
+
+  function recordingAdapter(
+    matched: BleDeviceInfo[],
+    ctxMfg: Array<{ id: number; data: Buffer } | undefined>,
+  ): ScaleAdapter {
+    return {
+      ...gattAdapter(),
+      matches: (info: BleDeviceInfo) => {
+        if (info.localName !== 'GATT-scale') return false;
+        matched.push(info);
+        return true;
+      },
+      onConnected: async (ctx: Parameters<NonNullable<ScaleAdapter['onConnected']>>[0]) => {
+        ctxMfg.push(ctx.manufacturerData);
+      },
+    } as ScaleAdapter;
+  }
+
+  it('hands the last seen manufacturer data to the session, not to the matcher', async () => {
+    const matched: BleDeviceInfo[] = [];
+    const ctxMfg: Array<{ id: number; data: Buffer } | undefined> = [];
+    const watcher = new ReadingWatcher(config, [recordingAdapter(matched, ctxMfg)]);
+    await watcher.start();
+    poolOf(watcher).emitAdvert({ localName: '', serviceUuids: [], manufacturerData: MFG_461 }, MAC);
+    poolOf(watcher).emitAdvert(
+      { localName: 'GATT-scale', serviceUuids: [normalizeUuid('ffe0')] },
+      MAC,
+    );
+    await watcher.nextReading();
+    expect(ctxMfg).toEqual([MFG_461]);
+    // Advertisement-time and post-discovery resolution both saw the named event
+    // as it arrived, without the cached manufacturer data.
+    expect(matched.length).toBeGreaterThan(0);
+    expect(matched.every((info) => info.manufacturerData === undefined)).toBe(true);
+    await watcher.stop();
+  });
+
+  it('hands none when no event for that address carried any', async () => {
+    const matched: BleDeviceInfo[] = [];
+    const ctxMfg: Array<{ id: number; data: Buffer } | undefined> = [];
+    const watcher = new ReadingWatcher(config, [recordingAdapter(matched, ctxMfg)]);
+    await watcher.start();
+    poolOf(watcher).emitAdvert({ localName: '', serviceUuids: [], manufacturerData: MFG_461 }, MAC);
+    poolOf(watcher).emitAdvert({ localName: 'GATT-scale', serviceUuids: [] }, 'AA:BB:CC:DD:EE:31');
+    await watcher.nextReading();
+    expect(ctxMfg).toEqual([undefined]);
+    await watcher.stop();
+  });
+});
