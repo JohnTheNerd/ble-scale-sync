@@ -7,7 +7,12 @@ import {
   buildConfig,
   buildUserProfileFrame,
 } from '../../src/scales/qn-scale/index.js';
-import { decodeStoredRecord, hasValidSumChecksum } from '../../src/scales/qn-scale/frames.js';
+import {
+  decodeStoredRecord,
+  decryptQnResistance,
+  hasValidSumChecksum,
+} from '../../src/scales/qn-scale/frames.js';
+import { qnAdvertTraits } from '../../src/scales/qn-scale/matching.js';
 import { NINETEEN_BYTE_RESULT_HOLD_MS } from '../../src/scales/qn-scale/constants.js';
 import { bleLog } from '../../src/ble/types.js';
 import { uuid16 } from '../../src/scales/body-comp-helpers.js';
@@ -3532,5 +3537,170 @@ describe('QN stored record and impedance (#461)', () => {
       now: '2026-07-19T04:37:40Z',
     });
     expect(reading).toBeNull();
+  });
+
+  // The scrambled impedance. The #461 advertisement sets the flag; the #75
+  // Renpho Elis 1 advertisement (bluetoothctl dump in #75) is the same model
+  // family with it clear, and that unit sends ~505 ohm as it is.
+  const ADVERT_461 = {
+    id: 0xffff,
+    data: Buffer.from([
+      0x08, 0x14, 0x01, 0x00, 0x00, 0x25, 0xe0, 0x16, 0x00, 0x05, 0xff, 0x61, 0x08, 0x01, 0x00,
+      0x15,
+    ]),
+  };
+  const ADDRESS_461 = 'FF050016E025';
+  const ADVERT_ELIS1 = {
+    id: 0xffff,
+    data: Buffer.from([
+      0x09, 0x5b, 0x01, 0x00, 0x00, 0x1a, 0x9a, 0x0e, 0x00, 0x04, 0xff, 0x60, 0x08, 0x00, 0x00,
+      0x01,
+    ]),
+  };
+  const ADDRESS_ELIS1 = 'FF04000E9A1A';
+  /** The maintainer's classic unit: 11 bytes, no marker at [11]. */
+  const ADVERT_CLASSIC = {
+    id: 0xffff,
+    data: Buffer.from([0x05, 0x5d, 0x00, 0x00, 0x00, 0x04, 0xa1, 0x13, 0x00, 0x03, 0xff]),
+  };
+
+  describe('decryptQnResistance', () => {
+    it('unscrambles the #461 values to a body resistance', () => {
+      expect(decryptQnResistance(0x10cf)).toBe(502); // 4303, the record's R50
+      expect(decryptQnResistance(0x10cd)).toBe(500); // 4301, its R500
+      expect(decryptQnResistance(0x10dd)).toBe(501); // 4317, the reporter's earlier reading
+    });
+
+    it('is its own inverse for every byte', () => {
+      for (let b = 0; b < 256; b++) {
+        const v = (b << 8) | b;
+        expect(decryptQnResistance(decryptQnResistance(v))).toBe(v);
+      }
+    });
+  });
+
+  describe('qnAdvertTraits', () => {
+    it('reads model 129 with the scrambled flag from the #461 advertisement', () => {
+      expect(qnAdvertTraits(ADVERT_461, ADDRESS_461)).toEqual({ category: 129, scrambled: true });
+    });
+
+    it('reads model 128 without the flag from the #75 Elis 1 advertisement', () => {
+      expect(qnAdvertTraits(ADVERT_ELIS1, ADDRESS_ELIS1)).toEqual({
+        category: 128,
+        scrambled: false,
+      });
+    });
+
+    it('finds no marker in the 11-byte classic advertisement', () => {
+      expect(qnAdvertTraits(ADVERT_CLASSIC, 'FF030013A104')).toEqual({
+        category: null,
+        scrambled: false,
+      });
+    });
+
+    it('ignores an advertisement whose MAC is not the connected device', () => {
+      expect(qnAdvertTraits(ADVERT_461, ADDRESS_ELIS1)).toBeNull();
+    });
+
+    it('skips the MAC check when the transport has no address', () => {
+      expect(qnAdvertTraits(ADVERT_461, '')).toEqual({ category: 129, scrambled: true });
+    });
+
+    it('ignores a company id the vendor SDK does not use', () => {
+      expect(qnAdvertTraits({ ...ADVERT_461, id: 0x1a10 }, ADDRESS_461)).toBeNull();
+      expect(qnAdvertTraits({ ...ADVERT_461, id: 0x01a8 }, ADDRESS_461)).toEqual({
+        category: 129,
+        scrambled: true,
+      });
+    });
+
+    it('needs manufacturer data', () => {
+      expect(qnAdvertTraits(undefined, ADDRESS_461)).toBeNull();
+    });
+  });
+
+  it('unscrambles the #461 record when its advertisement says so', async () => {
+    const reading = await runSession(makeAdapter(), [INFO_461, RECORD_461], {
+      now: CONNECTED_461,
+      deviceAddress: ADDRESS_461,
+      manufacturerData: ADVERT_461,
+    });
+    expect(reading).toEqual({ weight: 71.65, impedance: 502 });
+  });
+
+  it('does not carry the flag into the next session', async () => {
+    const adapter = makeAdapter();
+    await runSession(adapter, [INFO_461], {
+      now: CONNECTED_461,
+      deviceAddress: ADDRESS_461,
+      manufacturerData: ADVERT_461,
+    });
+    const reading = await runSession(adapter, [INFO_461, RECORD_461], { now: CONNECTED_461 });
+    expect(reading).toEqual({ weight: 71.65, impedance: 4303 });
+  });
+
+  it('leaves the record as sent when the advertisement belongs to another device', async () => {
+    const reading = await runSession(makeAdapter(), [INFO_461, RECORD_461], {
+      now: CONNECTED_461,
+      deviceAddress: ADDRESS_ELIS1,
+      manufacturerData: ADVERT_461,
+    });
+    expect(reading).toEqual({ weight: 71.65, impedance: 4303 });
+  });
+
+  it('leaves a classic session alone with its 11-byte advertisement too', async () => {
+    const reading = await runSession(makeAdapter(), [INFO_283, RECORD_283], {
+      now: '2026-07-19T04:37:40Z',
+      deviceAddress: 'FF030013A104',
+      manufacturerData: ADVERT_CLASSIC,
+    });
+    expect(reading).toBeNull();
+  });
+
+  // Live 0x10 path. No live frame from the #461 unit exists, so this pairs its
+  // advertisement (address check skipped) with a real live frame from another
+  // unit (#253, R 501 sent as is): it checks the wiring and the refutation
+  // warning, not a value.
+  describe('live frame', () => {
+    const INFO_253 = Buffer.from([
+      0x12, 0x12, 0xff, 0xcb, 0x89, 0x04, 0x00, 0x04, 0xff, 0x01, 0x17, 0x09, 0x00, 0x00, 0x05,
+      0x9f, 0x30, 0x73,
+    ]);
+    const LIVE_253 = Buffer.from([
+      0x10, 0x0e, 0xff, 0x01, 0x02, 0x21, 0x20, 0x01, 0xf5, 0x01, 0xf3, 0x00, 0xf1, 0x3c,
+    ]);
+
+    it('reads it as sent without the flag', async () => {
+      const reading = await runSession(makeAdapter(), [INFO_253, LIVE_253], {
+        now: '2026-07-10T13:28:40Z',
+      });
+      expect(reading).toEqual({ weight: 84.8, impedance: 501 });
+    });
+
+    it('unscrambles it with the flag, and warns once that the result is not a body', async () => {
+      const warn = vi.spyOn(bleLog, 'warn').mockImplementation(() => {});
+      try {
+        const reading = await runSession(makeAdapter(), [INFO_253, LIVE_253, LIVE_253], {
+          now: '2026-07-10T13:28:40Z',
+          manufacturerData: ADVERT_461,
+        });
+        expect(reading).toEqual({ weight: 84.8, impedance: 4317 });
+        const notABody = warn.mock.calls.filter((c) => String(c[0]).includes('not a body'));
+        expect(notABody).toHaveLength(1);
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it('treats an unscrambled 0xffff as no contact', async () => {
+      const noContact = Buffer.from(LIVE_253);
+      noContact.writeUInt16BE(0xffff, 7);
+      const reading = await runSession(makeAdapter(), [INFO_253, noContact], {
+        now: '2026-07-10T13:28:40Z',
+        manufacturerData: ADVERT_461,
+      });
+      // R1 reads as 0 (no contact) after unscrambling.
+      expect(reading).toEqual({ weight: 84.8, impedance: 0 });
+    });
   });
 });

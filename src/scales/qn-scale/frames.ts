@@ -186,6 +186,28 @@ export function decodeStoredRecord(data: Buffer): StoredRecord | null {
   };
 }
 
+/** Exchange bits `i` and `j` of a byte. */
+function swapBits(b: number, i: number, j: number): number {
+  return ((b >> i) & 1) === ((b >> j) & 1) ? b : b ^ ((1 << i) | (1 << j));
+}
+
+/** One byte of a scrambled resistance: bits 3 and 5, then 0 and 4, exchanged. */
+function unscrambleByte(b: number): number {
+  return swapBits(swapBits(b & 0xff, 3, 5), 0, 4);
+}
+
+/**
+ * Unscramble a u16 resistance from a scale whose advertisement flags its
+ * resistance as scrambled (see SCRAMBLE_FLAG_BIT in constants.ts, #461). Each
+ * byte is unscrambled on its own, so this is the same as unscrambling the two
+ * frame bytes and reading them big-endian. Its own inverse.
+ *
+ *   0x10cf (4303) -> 0x01f6 (502)
+ */
+export function decryptQnResistance(raw: number): number {
+  return (unscrambleByte(raw >> 8) << 8) | unscrambleByte(raw);
+}
+
 /** Age openScale's constant A00D #2 profile frame carries. */
 export const OPENSCALE_PROFILE_AGE = 33;
 /** Height in mm openScale's constant A00D #2 profile frame carries. */

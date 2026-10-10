@@ -191,6 +191,62 @@ export const SCALE_EPOCH_OFFSET = 946684800;
 export const USER_DELETE_SUBCOMMAND = 0x04;
 
 /**
+ * Scrambled impedance (#461).
+ *
+ * Some QN scales say in their advertisement that they scramble the resistance
+ * bytes they send. The vendor's published Android SDK (qnsdkX 2.37.2) reads it
+ * like this, and does nothing else to a 4-electrode resistance (no scaling):
+ *
+ *   - the manufacturer data (after the company id, 0xFFFF or 0x01A8) carries a
+ *     model marker at [11]; the markers below belong to the scales the SDK
+ *     drives with its newer ("VA") protocol, whose model number is the value;
+ *   - on those, bit 2 of [15] set means "resistance scrambled";
+ *   - a scrambled resistance has bits 3 and 5, and bits 0 and 4, swapped in
+ *     each of its two bytes before the bytes form the big-endian value.
+ *
+ * Two real units bracket it. The #461 Physiq advertises marker 0x61 with [15]
+ * = 0x15 (flag set) and sends 4303, 4301 and 4317, which unscramble to 502,
+ * 500 and 501 ohm. The #75 Renpho Elis 1 advertises 0x60 with [15] = 0x01
+ * (flag clear) and sends 507/505 as they are. Every QN unit we have logs from
+ * then lies between 493 and 513 ohm.
+ *
+ * Not a tenth of an ohm: 4303 / 10 lands in the body range only because the
+ * scrambled high byte of 0x01 is 0x10, and the vendor SDK never divides. Not
+ * decided from the value either: unscrambling a clear resistance between 512
+ * and 767 leaves it inside the body range, off by up to 39 ohm, with nothing to
+ * show for it. So only the advertised flag decides, and without an
+ * advertisement nothing is unscrambled.
+ *
+ * The SDK also defines a flag for its older scale family (bit 0 of [12]), but
+ * its category there depends on the advertised name and services as well, and
+ * no unit of that kind in our logs sets it, so it is not read here.
+ */
+export const SCRAMBLE_MARKER_OFFSET = 11;
+export const SCRAMBLE_FLAG_OFFSET = 15;
+export const SCRAMBLE_FLAG_BIT = 0x04;
+
+/** Company ids the SDK accepts on a QN advertisement. */
+export const QN_COMPANY_IDS: readonly number[] = [0xffff, 0x01a8];
+
+/** Model marker at [11] -> model number, for the scales that may scramble. */
+export const SCRAMBLE_CAPABLE_MARKERS: ReadonlyMap<number, number> = new Map([
+  [0x60, 128],
+  [0x65, 128],
+  [0x66, 128],
+  [0x68, 128],
+  [0x61, 129],
+  [0x62, 129],
+  [0x51, 134],
+  [0x52, 134],
+  [0x67, 152],
+  [0x69, 152],
+  [0x80, 143],
+]);
+
+/** A resistance at or above this means no contact, as in the vendor SDK. */
+export const NO_CONTACT_RESISTANCE = 60000;
+
+/**
  * Grace period (ms) to wait for an impedance frame after the first stable
  * R1=R2=0 frame on long-frame variants (e.g. ES-26M). If an impedance frame
  * arrives within this window, it supersedes the weight-only reading. If not,

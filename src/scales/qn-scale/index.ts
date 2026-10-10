@@ -1,4 +1,4 @@
-import { biaFatIfPlausible, buildPayload } from '../body-comp-helpers.js';
+import { biaFatIfPlausible, buildPayload, isPlausibleImpedance } from '../body-comp-helpers.js';
 import type {
   BleDeviceInfo,
   ConnectionContext,
@@ -43,6 +43,7 @@ import {
   MAX_STORED_QUERY_ATTEMPTS,
   MAX_STORED_RECORD_AGE_SEC,
   NINETEEN_BYTE_RESULT_HOLD_MS,
+  NO_CONTACT_RESISTANCE,
   POST_START_ANCHOR_DELAY_MS,
   PROTO_ECHO_MIN_INFO_FRAME_LEN,
   RESULT16_FRAME_LEN,
@@ -69,9 +70,10 @@ import {
   buildTimeSync,
   buildUserProfileFrame,
   decodeStoredRecord,
+  decryptQnResistance,
   hasValidSumChecksum,
 } from './frames.js';
-import { qnMatches, warnOnOneByoneShape } from './matching.js';
+import { qnAdvertTraits, qnMatches, warnOnOneByoneShape } from './matching.js';
 import { parseQnBroadcast } from './broadcast.js';
 
 // Re-exported so importers keep the paths they had before the split.
@@ -350,6 +352,17 @@ export class QnScaleAdapter
   /** Timer handle for the pending stored-data re-query. */
   private storedRetryTimer: ReturnType<typeof setTimeout> | null = null;
 
+  /**
+   * The advertisement this session matched on flags the resistance as
+   * scrambled (#461, see SCRAMBLE_FLAG_BIT). Set in onConnected, before
+   * anything is written, so it is in place before any frame with a resistance
+   * can arrive: the scale sends those only after the handshake.
+   */
+  private resistanceScrambled = false;
+
+  /** One "unscrambled impedance is not a body" warning per session (#461). */
+  private unscrambledImplausibleWarned = false;
+
   /** Receive the configured display unit from the composition root (#269). */
   configure(opts: AdapterRuntimeConfig): void {
     if (opts.displayUnit) this.displayUnit = opts.displayUnit;
@@ -471,6 +484,8 @@ export class QnScaleAdapter
     this.timeSyncSent = false;
     this.historyResponseSent = false;
     this.storedQueryAttempts = 0;
+    this.resistanceScrambled = false;
+    this.unscrambledImplausibleWarned = false;
     if (this.fallbackTimer) {
       clearTimeout(this.fallbackTimer);
       this.fallbackTimer = null;
@@ -493,6 +508,7 @@ export class QnScaleAdapter
    */
   async onConnected(ctx: ConnectionContext): Promise<void> {
     this.ctx = ctx;
+    this.readImpedanceFlag(ctx);
     // The session clock is re-stamped here as well as in onSessionStart, for a
     // caller that drives onConnected directly (a test, or a transport that
     // predates the hook).
@@ -592,6 +608,51 @@ export class QnScaleAdapter
       bleLog.debug('QN: fallback: sending history + start');
       await this.handleConfigRequest();
     }
+  }
+
+  /** Read the impedance flag from the session's advertisement (#461). */
+  private readImpedanceFlag(ctx: ConnectionContext): void {
+    const traits = qnAdvertTraits(ctx.manufacturerData, ctx.deviceAddress);
+    this.resistanceScrambled = traits?.scrambled === true;
+    if (!ctx.manufacturerData) {
+      bleLog.debug('QN: no advertisement for this session, impedance read as sent (#461)');
+    } else if (!traits) {
+      bleLog.debug(
+        `QN: advertisement (company 0x${ctx.manufacturerData.id.toString(16).padStart(4, '0')}) ` +
+          'is not a QN one for this device, impedance read as sent (#461)',
+      );
+    } else if (traits.category === null) {
+      bleLog.debug(
+        'QN: advertisement has no scrambling model marker, impedance read as sent (#461)',
+      );
+    } else {
+      bleLog.debug(
+        `QN: advertisement model ${traits.category}, impedance ` +
+          (traits.scrambled
+            ? 'scrambled: unscrambling it as the vendor SDK does (#461)'
+            : 'not scrambled (#461)'),
+      );
+    }
+  }
+
+  /**
+   * The resistance a frame carries, unscrambled when the advertisement said so
+   * (see SCRAMBLE_FLAG_BIT). Untouched otherwise, so a scale that does not set
+   * the flag gets exactly the bytes it sent.
+   */
+  private resistance(raw: number): number {
+    if (!this.resistanceScrambled || raw === 0) return raw;
+    const unscrambled = decryptQnResistance(raw);
+    const value = unscrambled >= NO_CONTACT_RESISTANCE ? 0 : unscrambled;
+    bleLog.debug(`QN: impedance ${raw} unscrambled to ${value} Ohm (#461)`);
+    if (value !== 0 && !isPlausibleImpedance(value) && !this.unscrambledImplausibleWarned) {
+      this.unscrambledImplausibleWarned = true;
+      bleLog.warn(
+        `QN: this scale advertises a scrambled impedance, and unscrambling ${raw} gives ` +
+          `${value} Ohm, which is not a body. Please report this log on #461.`,
+      );
+    }
+    return value;
   }
 
   /** See matching.ts. Pure over the advertisement, so it lives outside the class. */
@@ -875,7 +936,7 @@ export class QnScaleAdapter
         `QN: stored 0x23 reading ${weight}kg, R50 ${r1} / R500 ${r2}` +
           (classic ? ' (classic offsets)' : ''),
       );
-      return { weight, impedance: r1 > 0 ? r1 : r2 };
+      return { weight, impedance: this.resistance(r1 > 0 ? r1 : r2) };
     }
 
     // Extended-dialect completed-weigh-in result frames (#235). Gated to the
@@ -1030,7 +1091,7 @@ export class QnScaleAdapter
     if (weight === null) return null;
 
     // R1 (primary BIA resistance) and R2 (secondary)
-    const impedance = r1 > 0 ? r1 : r2;
+    const impedance = this.resistance(r1 > 0 ? r1 : r2);
 
     // Reset the impedance grace timer on successful reading
     this.firstStableNoImpedanceAt = null;
