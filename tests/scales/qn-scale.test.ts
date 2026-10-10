@@ -7,7 +7,7 @@ import {
   buildConfig,
   buildUserProfileFrame,
 } from '../../src/scales/qn-scale/index.js';
-import { hasValidSumChecksum } from '../../src/scales/qn-scale/frames.js';
+import { decodeStoredRecord, hasValidSumChecksum } from '../../src/scales/qn-scale/frames.js';
 import { NINETEEN_BYTE_RESULT_HOLD_MS } from '../../src/scales/qn-scale/constants.js';
 import { bleLog } from '../../src/ble/types.js';
 import { uuid16 } from '../../src/scales/body-comp-helpers.js';
@@ -446,23 +446,25 @@ describe('QnScaleAdapter', () => {
 
     // #213 / #75: V10 Renpho / ES-CS20M firmware delivers the weigh-in via the
     // stored-data query path (0x22 -> 0x23), not reliably via live 0x10 frames.
-    // openScale QNHandler parses 0x23: weight=u16be[10,11]/100, r1=u16le[13,14],
-    // r2=u16le[15,16], timestamp=u32le[6,9] (2000-epoch seconds).
+    // Layout: time u32le[6..9] (2000-epoch seconds), weight u16be[10..11]/100,
+    // R50 u16be[12..13], R500 u16be[14..15] (#461, see decodeStoredRecord).
     it('parses a fresh 0x23 stored measurement as a reading', () => {
-      const adapter = makeAdapter();
-      const nowScaleSeconds = Math.floor(Date.now() / 1000) - 946684800;
-      const buf = Buffer.alloc(19);
-      buf[0] = 0x23;
-      buf[1] = 0x13;
-      buf[2] = 0xff;
-      buf.writeUInt32LE(nowScaleSeconds >>> 0, 6);
-      buf.writeUInt16BE(8495, 10); // 84.95 kg
-      buf.writeUInt16LE(504, 13); // r1
-      buf.writeUInt16LE(246, 15); // r2
-      const reading = adapter.parseNotification(buf);
-      expect(reading).not.toBeNull();
-      expect(reading!.weight).toBeCloseTo(84.95);
-      expect(reading!.impedance).toBe(504);
+      vi.useFakeTimers();
+      try {
+        // The real record from #213, at the time it was logged.
+        vi.setSystemTime(new Date('2026-06-05T09:17:26.294Z'));
+        const adapter = makeAdapter();
+        const buf = Buffer.from([
+          0x23, 0x13, 0xff, 0x01, 0x01, 0xf0, 0xa1, 0x50, 0xb5, 0x31, 0x21, 0x2f, 0x01, 0xf8, 0x01,
+          0xf6, 0x00, 0x00, 0x3e,
+        ]);
+        const reading = adapter.parseNotification(buf);
+        expect(reading).not.toBeNull();
+        expect(reading!.weight).toBeCloseTo(84.95);
+        expect(reading!.impedance).toBe(504);
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it('rejects a stale 0x23 stored record (older than 90s before now)', () => {
@@ -3413,5 +3415,122 @@ describe('buildUserProfileFrame (#331)', () => {
     const f = buildUserProfileFrame(Number.NaN, Number.POSITIVE_INFINITY);
     expect(f[7]).toBe(33);
     expect((f[8] << 8) | f[9]).toBe(1720);
+  });
+});
+
+// #461: a Physiq (QN-Scale, 18-byte es26m) that delivered its weigh-in as a
+// 0x23 stored record. Every frame below is byte for byte from the reporter's
+// public DEBUG log (node-ble); the address is the one the log shows.
+describe('QN stored record and impedance (#461)', () => {
+  const INFO_461 = Buffer.from([
+    0x12, 0x12, 0xff, 0x25, 0xe0, 0x16, 0x00, 0x05, 0xff, 0x13, 0x07, 0x16, 0x00, 0x00, 0x05, 0x9f,
+    0x32, 0x48,
+  ]);
+  const RECORD_461 = Buffer.from([
+    0x23, 0x14, 0xff, 0x01, 0x01, 0xf0, 0x87, 0xc0, 0x5c, 0x32, 0x1b, 0xfd, 0x10, 0xcf, 0x10, 0xcd,
+    0x00, 0x00, 0x00, 0xd1,
+  ]);
+  const EMPTY_461 = Buffer.from([0x23, 0x14, 0xff, ...new Array<number>(16).fill(0), 0x36]);
+  /** Connect time in the log; the record is stamped 09:23:19. */
+  const CONNECTED_461 = '2026-10-10T09:23:02.077Z';
+
+  /** #283, a classic scale: its 0x12 and the 0x23 it answered with. */
+  const INFO_283 = Buffer.from([
+    0x12, 0x11, 0xff, 0xd3, 0x60, 0x18, 0x00, 0x01, 0xfb, 0x0a, 0x03, 0x19, 0x00, 0x04, 0x05, 0x07,
+    0x9f,
+  ]);
+  const RECORD_283 = Buffer.from([
+    0x23, 0x13, 0xff, 0x04, 0x01, 0x09, 0x11, 0xef, 0x31, 0x18, 0x1a, 0x01, 0xfc, 0x01, 0xf8, 0x00,
+    0x00, 0x00, 0x9c,
+  ]);
+
+  interface SessionOptions {
+    now: string;
+    deviceAddress?: string;
+    manufacturerData?: { id: number; data: Buffer };
+  }
+
+  /**
+   * One session in transport order (onSessionStart, onConnected, frames), with
+   * every write collected. Returns the last reading the frames produced.
+   */
+  async function runSession(
+    adapter: QnScaleAdapter,
+    frames: Buffer[],
+    opts: SessionOptions,
+    writes: number[][] = [],
+  ) {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date(opts.now));
+      const ctx = {
+        write: async (_uuid: string, data: Buffer | number[]) => {
+          writes.push([...data]);
+        },
+        read: async () => Buffer.alloc(0),
+        subscribe: async () => {},
+        profile: defaultProfile(),
+        deviceAddress: opts.deviceAddress ?? '',
+        availableChars: new Set<string>(),
+        ...(opts.manufacturerData ? { manufacturerData: opts.manufacturerData } : {}),
+      } as unknown as ConnectionContext;
+      adapter.onSessionStart?.();
+      await adapter.onConnected(ctx);
+      let reading = null;
+      for (const frame of frames) {
+        reading = adapter.parseNotification(frame) ?? reading;
+        await vi.advanceTimersByTimeAsync(100);
+      }
+      return reading;
+    } finally {
+      vi.useRealTimers();
+    }
+  }
+
+  describe('decodeStoredRecord', () => {
+    it('reads both resistances big-endian at [12..13] and [14..15]', () => {
+      expect(decodeStoredRecord(RECORD_461)).toEqual({
+        weight: 71.65,
+        recordSeconds: 844939399,
+        r50: 4303,
+        r500: 4301,
+      });
+    });
+
+    it('needs at least 16 bytes', () => {
+      expect(decodeStoredRecord(RECORD_461.subarray(0, 15))).toBeNull();
+    });
+  });
+
+  it('reads the #461 record without an advertisement as the raw R50', async () => {
+    const reading = await runSession(makeAdapter(), [INFO_461, RECORD_461], {
+      now: CONNECTED_461,
+    });
+    expect(reading).toEqual({ weight: 71.65, impedance: 4303 });
+  });
+
+  it('still re-queries after the empty record #461 sent first', async () => {
+    const writes: number[][] = [];
+    const adapter = makeAdapter();
+    await runSession(adapter, [INFO_461], { now: CONNECTED_461 }, writes);
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-10-10T09:23:05.302Z'));
+      writes.length = 0;
+      expect(adapter.parseNotification(EMPTY_461)).toBeNull();
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(writes.filter((w) => w[0] === 0x22)).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // A classic scale's 0x23 has its own layout; the session that saw its short
+  // 0x12 keeps reading it exactly as before, which drops this one as stale.
+  it('leaves a classic session alone (#283)', async () => {
+    const reading = await runSession(makeAdapter(), [INFO_283, RECORD_283], {
+      now: '2026-07-19T04:37:40Z',
+    });
+    expect(reading).toBeNull();
   });
 });

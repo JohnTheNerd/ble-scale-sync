@@ -68,6 +68,7 @@ import {
   buildMeasurementTrigger,
   buildTimeSync,
   buildUserProfileFrame,
+  decodeStoredRecord,
   hasValidSumChecksum,
 } from './frames.js';
 import { qnMatches, warnOnOneByoneShape } from './matching.js';
@@ -818,11 +819,16 @@ export class QnScaleAdapter
 
     // 0x23: stored measurement record returned after the 0x22 history query.
     // V10 Renpho / ES-CS20M firmware delivers the weigh-in here, not reliably
-    // via live 0x10 frames (#213 / #75). Layout from openScale QNHandler:
-    //   [6-9]   record timestamp, LE uint32 (2000-epoch seconds)
-    //   [10-11] weight, BE uint16, / 100 kg
-    //   [13-14] primary resistance R1, LE uint16
-    //   [15-16] secondary resistance R2, LE uint16
+    // via live 0x10 frames (#213 / #75). Layout in decodeStoredRecord: R50 and
+    // R500 big-endian at [12..13] and [14..15], as the vendor SDK reads them
+    // (#461), not openScale's little-endian [13..14] and [15..16].
+    //
+    // A session that positively identified a classic scale (a short 0x12)
+    // keeps the old offsets. Classic firmware has a different 0x23 layout
+    // altogether, the record time included, so its records fail the freshness
+    // check below as stale; changing how they are read is a separate change
+    // with its own evidence. A session without any 0x12 reads the long layout,
+    // which is what every real record we have uses.
     if (opcode === 0x23) {
       // On the 19-byte dialect `23 00 .. 00 23` comes after the 20-byte stream,
       // 13 s after the stable weight and 200 ms before the result block (#331),
@@ -842,29 +848,33 @@ export class QnScaleAdapter
             'reading it as a stored record (#331)',
         );
       }
-      if (data.length < 17) {
+      const record = data.length < 17 ? null : decodeStoredRecord(data);
+      if (!record) {
         this.scheduleStoredDataRetry();
         return null;
       }
-      const weight = data.readUInt16BE(10) / 100;
+      const { weight, recordSeconds } = record;
       if (weight <= 5 || weight >= 300) {
         this.scheduleStoredDataRetry();
         return null;
       }
-      const recordSeconds = data.readUInt32LE(6);
       const sessionSeconds =
         this.sessionStartedScaleSeconds ?? Math.floor(Date.now() / 1000) - SCALE_EPOCH_OFFSET;
       if (recordSeconds + MAX_STORED_RECORD_AGE_SEC < sessionSeconds) {
         this.scheduleStoredDataRetry();
         return null;
       }
-      const r1 = data.readUInt16LE(13);
-      const r2 = data.readUInt16LE(15);
+      const classic = this.scaleFactorKnown && !this.isLongFrameVariant;
+      const r1 = classic ? data.readUInt16LE(13) : record.r50;
+      const r2 = classic ? data.readUInt16LE(15) : record.r500;
       if (this.storedRetryTimer) {
         clearTimeout(this.storedRetryTimer);
         this.storedRetryTimer = null;
       }
-      bleLog.debug(`QN: stored 0x23 reading ${weight}kg / ${r1 > 0 ? r1 : r2}Ω`);
+      bleLog.debug(
+        `QN: stored 0x23 reading ${weight}kg, R50 ${r1} / R500 ${r2}` +
+          (classic ? ' (classic offsets)' : ''),
+      );
       return { weight, impedance: r1 > 0 ? r1 : r2 };
     }
 
