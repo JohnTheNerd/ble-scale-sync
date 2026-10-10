@@ -23,7 +23,6 @@ version: 1
 #   preemptive_adapter_reset: false   # Linux node-ble: skip the btmgmt power-cycle after each session (default true)
 #   adapter_privacy: true             # Linux node-ble: LE privacy so Beurer scales keep the pairing (adapter-wide, see docs)
 #   qn_protocol_byte: 0               # QN scales only: 0 to 255, see below
-#   qn_report_byte: 252               # QN scales only: 0 to 255, see below
 #
 # scale_mac: omit for auto-discovery. On macOS, use the CoreBluetooth UUID.
 # noble_driver: default is node-ble (Linux), abandonware (Windows), stoprocent (macOS).
@@ -45,9 +44,11 @@ version: 1
 #          protocol byte the handshake echoes back to the scale. Set it only when a QN scale
 #          connects, completes the whole handshake in the debug log and then never reports a
 #          weight. Try 0, or 255, or the value the "QN: scale info" log line reports.
-# qn_report_byte: QN-family scales only, and only worth trying after qn_protocol_byte did not
-#          help. Payload byte of the history-response frame, default 254 (0xFE). Vendor-app
-#          captures of a GE CS 10 G and an Arboleaf QN-Scale both send 252 (0xFC) instead.
+# qn_report_byte: QN-family scales only. Leave it unset: it deletes data on the scale. When
+#          set, every connection sends the command that deletes the user slots this mask
+#          selects (252 = slots 3 to 8, 254 = slots 2 to 8), which can remove other people's
+#          users on a shared scale. Only for a scale that stopped reporting without it; see
+#          the configuration guide.
 #
 # --- ESP32 MQTT Proxy (when handler: mqtt-proxy) ---
 #   mqtt_proxy:

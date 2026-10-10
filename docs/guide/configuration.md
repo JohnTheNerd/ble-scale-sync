@@ -178,7 +178,7 @@ If a value makes your scale work, please say so in an issue with the model and t
 
 ::: warning `qn_report_byte` deletes users on the scale
 
-Up to v1.31.0 the handshake answered the scale's configuration request (`0x21`) with this frame on every QN-family scale:
+Up to v1.31.0 the handshake answered the scale's configuration request (`0x21`) with this frame on every QN-family scale, with `fc` on the long-frame dialects and `fe` on the classic one or when the scale-info frame never arrived:
 
 ```
 a0 0d 04 fc 00 00 00 00 00 00 00 00 <checksum>
@@ -209,7 +209,7 @@ If your scale needs it, please open an issue with the model and the `QN: scale i
 
 ::: tip QN scales that finish the handshake and then stream nothing (`qn_weight_ack`)
 
-There is a third silent-failure knob in this family.
+There is a second silent-failure knob in this family.
 
 One reading of a vendor-app capture of a GE CS 10 G has the app answering live weight frames with an acknowledgement carrying that frame's own weight:
 
