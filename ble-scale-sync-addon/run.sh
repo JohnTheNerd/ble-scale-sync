@@ -242,11 +242,13 @@ if [ "$CUSTOM_CONFIG" = "true" ]; then
   fi
   # In this mode the whole option-to-config generation below is skipped, so any
   # UI option set here does nothing. Say so for the two QN bytes specifically:
-  # they are diagnostic knobs handed to reporters who are chasing a scale that
-  # reads nothing, and someone who already moved to custom_config to set one by
-  # hand is exactly the person who would toggle the UI option, see no change and
-  # report a false negative. A wrong value for either is silent by nature, so a
-  # setting that is silently ignored is worse here than almost anywhere else.
+  # they are knobs handed to reporters who are chasing a scale that reads
+  # nothing (qn_report_byte, since #461 the mask of user slots the scale
+  # deletes, only for one that stopped reporting without it), and someone who
+  # already moved to custom_config to set one by hand is exactly the person who
+  # would toggle the UI option, see no change and report a false negative. A
+  # wrong value for either is silent by nature, so a setting that is silently
+  # ignored is worse here than almost anywhere else.
   for _qn in qn_protocol_byte qn_report_byte qn_weight_ack qn_a4_prelude \
     qn_time_sync_long qn_config_long auto_clear_stale_bond adapter_privacy; do
     if [ -n "$(opt "$_qn")" ]; then
@@ -643,10 +645,11 @@ YAML
   #
   # The value is normalised to decimal before it is written. A leading zero is
   # read as octal by any YAML 1.1 reader ("010" as 8, "064" as 52), and this
-  # file used to pass through one (PyYAML) on its way to the app. Both of these
-  # settings fail silently when wrong (every command acknowledged, no weight
-  # ever arriving), so a reporter told to try a value and typing a leading zero
-  # would run a different experiment and report a false negative. A plain
+  # file used to pass through one (PyYAML) on its way to the app. A wrong
+  # qn_protocol_byte fails silently (every command acknowledged, no weight ever
+  # arriving), and qn_report_byte is the mask of user slots the scale deletes
+  # (#461), so a value typed with a leading zero would run a different
+  # experiment, or delete different slots, without a word. A plain
   # decimal means the same thing to every reader. Surrounding whitespace is
   # trimmed for the same reason: it comes free from a text field.
   for _qn in QN_PROTOCOL_BYTE QN_REPORT_BYTE; do

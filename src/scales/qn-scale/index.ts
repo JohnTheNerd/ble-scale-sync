@@ -605,7 +605,7 @@ export class QnScaleAdapter
     }
 
     if (!this.historyResponseSent) {
-      bleLog.debug('QN: fallback: sending history + start');
+      bleLog.debug('QN: fallback: sending the profile frame + start');
       await this.handleConfigRequest();
     }
   }
