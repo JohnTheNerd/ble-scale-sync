@@ -4,12 +4,12 @@ description: Every BLE smart scale brand and model supported by BLE Scale Sync.
 head:
   - - meta
     - name: keywords
-      content: koogeek scale, xiaomi mi scale, renpho scale bluetooth, eufy smart scale, yunmai scale, beurer bf scale, sanitas scale, medisana bs scale, silvercrest scale, 1byone scale, etekcity scale, inevifit scale, arboleaf scale, lepulse scale, fitdays scale, senssun scale, grifema scale, supported ble scales
+      content: koogeek scale, xiaomi mi scale, renpho scale bluetooth, eufy smart scale, yunmai scale, beurer bf scale, sanitas scale, medisana bs scale, silvercrest scale, 1byone scale, etekcity scale, inevifit scale, arboleaf scale, lepulse scale, fitdays scale, senssun scale, grifema scale, okok scale, chipsea scale, supported ble scales
 ---
 
 # Supported Scales
 
-**36 protocol adapters**, plus a Standard BT SIG catch-all for any spec-compliant scale. Most adapters cover several rebrands, so real coverage is wider than the count.
+**37 protocol adapters**, plus a Standard BT SIG catch-all for any spec-compliant scale. Most adapters cover several rebrands, so real coverage is wider than the count.
 
 ## Scale List
 
@@ -21,9 +21,11 @@ _Weight only_ means weight is reported normally but body composition is estimate
 | **Xiaomi** Mi Smart Scale 2 (XMTZC04HM / MI SCALE2)                   | Weight only      | No pairing needed                                                                                                                                 |
 | **Silvergear** Smart Scale 108                                        | Weight only      | Broadcast only; the display unit does not matter                                                                                                  |
 | **Grifema** GA2001 / **Senssun** IF_B7                                | Weight only      | Broadcast only; kg or lb display                                                                                                                  |
+| **OKOK** (Chipsea broadcast): nameless, Yoda0 / Yoda1, `ADV`          | Weight only      | Broadcast only; kg display only; a nameless unit needs `ble.scale_mac` on the default Linux transport                                             |
 | **Xiaomi** Mijia Body Composition Scale S800 (ms116)                  | Weight only      | Needs a per-device `ble.bind_key` from the Mi cloud                                                                                               |
 | **Xiaomi** Body Composition Scale S400 (MJTZC01YM)                    | Yes              | Needs a per-device `ble.bind_key` from the Mi cloud plus `ble.scale_mac`; weigh barefoot for impedance                                            |
 | **Renpho** ES-CS20M / ES-32MD / Elis 1 / FITINDEX / Sencor (QN-Scale) | Yes              | The most common protocol; many rebrands                                                                                                           |
+| **Arboleaf** (QN-Scale, 19-byte dialect)                              | Weight only      | Same QN protocol; needs `ble.qn_weight_ack` and `ble.qn_time_sync_long`, see below                                                                |
 | **Renpho** ES-WBE28                                                   | Yes              | Standard GATT variant                                                                                                                             |
 | **Renpho** ES-26BB-B                                                  | Yes              |                                                                                                                                                   |
 | **Renpho** R-MSC04 (MorphoScan Nova)                                  | Weight only      |                                                                                                                                                   |
@@ -96,7 +98,15 @@ The measurement protocol is implemented and verified, but this hardware's GATT c
 
 ### **Renpho** R-MSC04 (MorphoScan Nova)
 
-Weight is read and verified. The scale measures body composition after the weight settles and sends it about 15 seconds later, so the connection stays open for up to 30 seconds after the weight settles: stay on the scale until its display shows the results. When the scale's record arrives, its body fat and visceral fat are used, but only if the height implied by the BMI the scale reports is within 3 cm of yours (the scale most likely uses the profile last written to it by the Renpho app, which may be another household member's); otherwise, or when no record arrives in time, body composition is estimated from BMI (Deurenberg formula). The ten segment impedances the scale reports are logged in debug mode only, and no whole-body impedance is derived from them. This is not yet confirmed on hardware ([#434](https://github.com/KristianP26/ble-scale-sync/issues/434)).
+Weight is read and verified. Right after connecting, ble-scale-sync sets the scale's clock to the host's time and time zone and writes a guest profile, the same two writes an ESPHome client written for this scale sends. Before this change the scale was seen to drop every connection about 5.5 seconds after it was made, so a weigh-in that took longer to settle was lost and body composition never arrived ([#434](https://github.com/KristianP26/ble-scale-sync/issues/434)). The start command earlier versions sent is no longer sent. Time zones west of Greenwich are sent as UTC, because it is not known how the scale encodes them.
+
+The guest profile holds the **first configured user's** height and last known weight: `last_known_weight`, otherwise the middle of `weight_range` when that range lies between 20 and 250 kg and spans no more than 100 kg, otherwise 70 kg. It is written on every weigh-in, also in multi-user setups, whoever steps on. It uses the profile slot that ESPHome client uses, not the slot of a user registered in the Renpho app. ble-scale-sync never writes this profile to its log. With the [ESP32 proxy](/guide/esp32-proxy), the frame passes through your MQTT broker unencrypted like every other frame.
+
+The scale measures body composition after the weight settles and sends it about 15 seconds later, so the connection stays open for up to 30 seconds after the weight settles: stay on the scale until its display shows the results. The scale's body fat and visceral fat are logged but not used yet. They are most likely computed for the guest profile, and one byte of it, probably sex and age, is not decoded, so they may not fit you. Body composition is estimated from BMI (Deurenberg formula) instead. The scale's own display may show results for the guest profile. The ten segment impedances are logged in debug mode only, and no whole-body impedance is derived from them. None of this is confirmed on hardware yet.
+
+### **Arboleaf** (QN-Scale, 19-byte dialect)
+
+These units log `QN: scale info (19B, dialect=es26m)` in debug mode. One of them has streamed its weight with `ble.qn_weight_ack: true` and `ble.qn_time_sync_long: true`; whether it needs both is not known yet, so set both (see [Configuration](/guide/configuration#ble)). After the weight settles the scale measures body composition for about 14 seconds more and then sends its results, so the connection stays open until the scale's last result frame: stay on the scale until its display shows the results. If that frame never comes, the weight is sent on its own 40 seconds after it settled. The scale's own body-composition values and the result block it sends (likely segment impedances) are not decoded, so body composition is estimated from BMI (Deurenberg formula). Only a scale set to display kg has been logged so far. With lb or st the weight frame may differ; if the log then warns about the weight frame, please attach a DEBUG log to the issue. The decode rests on a single logged weigh-in and is not yet confirmed on hardware ([#331](https://github.com/KristianP26/ble-scale-sync/issues/331)).
 
 ### **Eufy** Smart Scale P2 / P2 Pro
 
@@ -119,6 +129,15 @@ The reading waits for that frame before it is sent, so it arrives about two seco
 ### **Grifema** GA2001 / **Senssun** IF_B7
 
 Weight only. The scale advertises as `IF_B7` and broadcasts its weigh-in without accepting a connection. It sends the weight in kilograms whether its display is set to kg or lb (the lb case rests on a single weigh-in so far); any other display unit is ignored with a warning in the log. Its final frame carries a field that looks like impedance, but one weigh-in with a body-fat figure from the vendor app is not enough to decode it, so body composition is estimated from BMI (Deurenberg formula) and the field is logged in debug mode. More weigh-ins paired with the app's body-fat reading would settle it ([#423](https://github.com/KristianP26/ble-scale-sync/issues/423)).
+
+### **OKOK** app scales (Chipsea broadcast)
+
+Weight only. These Chipsea-based scales, sold under many names with the OKOK app (for example NIX Home, Xiaogui TZC4, MaxxMee QJ-J and BL-26L01), broadcast their weigh-in without accepting a connection, in one of two formats: one advertised as `ADV`, and one without a name, or named `Yoda0` / `Yoda1`.
+
+- **Nameless units** are recognised because they repeat their own Bluetooth address inside the broadcast, so the transport must report addresses. On the default Linux transport set `ble.scale_mac` (`scan` and the setup wizard list nameless scales with their address). macOS does not expose addresses, so there only units named `Yoda0`, `Yoda1` or `ADV` work.
+- **Keep the scale on kg.** Other display units and precisions are not decoded: a reading the scale marks that way is ignored with a warning in the log.
+- **No impedance.** The broadcast carries a field other tools show as impedance, but it holds the same value on every unit captured so far, so body composition is estimated from BMI (Deurenberg formula) and the field is logged in debug mode.
+- Scales advertising as `Chipsea-BLE` use other formats that are not supported yet ([#408](https://github.com/KristianP26/ble-scale-sync/issues/408)).
 
 ### **Renpho ES-CS20M / Elis 1** (some hardware variants)
 

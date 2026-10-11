@@ -1,4 +1,4 @@
-import { biaFatIfPlausible, buildPayload } from '../body-comp-helpers.js';
+import { biaFatIfPlausible, buildPayload, isPlausibleImpedance } from '../body-comp-helpers.js';
 import type {
   BleDeviceInfo,
   ConnectionContext,
@@ -11,6 +11,7 @@ import type {
   AdapterRuntimeConfig,
   MultiCharNotify,
   UserWeightHint,
+  HoldForComposition,
 } from '../../interfaces/scale-adapter.js';
 import { bleLog, errMsg, normalizeUuid } from '../../ble/types.js';
 import type { MatchDescriptor } from '../match-descriptor.js';
@@ -33,13 +34,21 @@ import {
   IMPEDANCE_GRACE_MS,
   LAST_KNOWN_WEIGHT_TOLERANCE,
   LEGACY_PROTO_TYPE,
+  LIVE20_FIRST_PART_BYTE2,
+  LIVE20_FRAME_LEN,
+  LIVE20_STATUS_MEASURING,
+  LIVE20_STATUS_RESULT,
+  LIVE20_STATUS_STABLE,
   MAX_AE00_RESPONSES,
   MAX_STORED_QUERY_ATTEMPTS,
   MAX_STORED_RECORD_AGE_SEC,
+  NINETEEN_BYTE_RESULT_HOLD_MS,
+  NO_CONTACT_RESISTANCE,
   POST_START_ANCHOR_DELAY_MS,
   PROTO_ECHO_MIN_INFO_FRAME_LEN,
-  REPORT_BYTE_DEFAULT,
-  REPORT_BYTE_LONG_FRAME,
+  RESULT16_FRAME_LEN,
+  RESULT16_OPCODE_COMPOSITION,
+  RESULT16_OPCODE_DONE,
   RESULT_MAX_WEIGHT_KG,
   RESULT_MIN_WEIGHT_KG,
   RESULT_OPCODE_B1,
@@ -50,6 +59,7 @@ import {
   TRIGGER_GAP_MS,
   TRIGGER_REPEATS,
   TRIGGER_WEIGHT_FALLBACK_KG,
+  USER_DELETE_SUBCOMMAND,
   WEIGHT_CERTAIN_MAX_KG,
   WEIGHT_CERTAIN_MIN_KG,
 } from './constants.js';
@@ -59,8 +69,11 @@ import {
   buildMeasurementTrigger,
   buildTimeSync,
   buildUserProfileFrame,
+  decodeStoredRecord,
+  decryptQnResistance,
+  hasValidSumChecksum,
 } from './frames.js';
-import { qnMatches, warnOnOneByoneShape } from './matching.js';
+import { qnAdvertTraits, qnMatches, warnOnOneByoneShape } from './matching.js';
 import { parseQnBroadcast } from './broadcast.js';
 
 // Re-exported so importers keep the paths they had before the split.
@@ -77,7 +90,7 @@ const hex = (data: number[] | Buffer): string =>
   [...data].map((b) => b.toString(16).padStart(2, '0')).join(' ');
 
 export class QnScaleAdapter
-  implements ScaleAdapterCore, GattWiring, BroadcastSource, MultiCharNotify
+  implements ScaleAdapterCore, GattWiring, BroadcastSource, MultiCharNotify, HoldForComposition
 {
   readonly name = 'QN Scale';
   readonly match: MatchDescriptor = {
@@ -232,8 +245,8 @@ export class QnScaleAdapter
   private forcedProtocolType: number | null = null;
 
   /**
-   * Payload byte of the A00D history-response frame, forced by
-   * `ble.qn_report_byte` (#235, #75, #331). Null leaves REPORT_BYTE_DEFAULT.
+   * Slot mask of the A00D user-delete frame, set by `ble.qn_report_byte`. Null
+   * (the default) sends no such frame at all; see USER_DELETE_SUBCOMMAND (#461).
    */
   private forcedReportByte: number | null = null;
 
@@ -245,8 +258,54 @@ export class QnScaleAdapter
   /** One anchor-fallback warning per session, reset in onConnected. */
   private anchorFallbackWarned = false;
 
-  /** One "20-byte live frame not decoded" line per session (#331). */
+  /** One "20-byte live frame" debug line per session, on either 20-byte path (#331). */
   private twentyByteFrameLogged = false;
+
+  /**
+   * The 19-byte dialect's streamed weigh-in (#331, D037). `live20Seen`: a
+   * well-formed 20-byte 0x10 arrived this session, which is what makes a later
+   * 0x23 marker and the 0x15/0x16 frames part of the same weigh-in.
+   * `live20Weight`: the stable weight, held until 0x16 (`live20ResultSeen`)
+   * closes the weigh-in.
+   */
+  private live20Seen = false;
+  private live20Weight: number | null = null;
+  private live20ResultSeen = false;
+
+  /** One "unexpected [2] in a 20-byte first part" warning per session (#331). */
+  private live20Byte2Warned = false;
+
+  /**
+   * Readings that stand in for a weigh-in the scale has not finished yet. Keyed
+   * by the reading, like ReadingComposition, so isFinal answers for the object
+   * it is handed rather than for whichever frame was parsed last. Never reset:
+   * a reading from an earlier session is never handed back.
+   */
+  private readonly provisionalReadings = new WeakSet<ScaleReading>();
+
+  /**
+   * Hold the link from the 19-byte dialect's stable weight until its 0x16
+   * (D037). Undefined before a stable weight and on every other dialect, so
+   * nothing else this adapter returns is held.
+   */
+  get completionHoldMs(): number | undefined {
+    return this.live20Weight !== null ? NINETEEN_BYTE_RESULT_HOLD_MS : undefined;
+  }
+
+  /** Only the 19-byte stable weight is provisional; see completionHoldMs. */
+  isFinal(reading: ScaleReading): boolean {
+    return !this.provisionalReadings.has(reading);
+  }
+
+  /**
+   * True from the 19-byte stable weight until 0x16. HoldTimer asks only when a
+   * window ends, so this has to cover the scale's whole BIA, not just the
+   * result block: a BIA that outlasts the window then gets the extension steps
+   * instead of a cut link and a reconnect that sends START into it.
+   */
+  isCompositionPending(): boolean {
+    return this.live20Weight !== null && !this.live20ResultSeen;
+  }
 
   /**
    * Whether a completed-weigh-in result frame (0xB4/0xB1) has already produced a
@@ -293,11 +352,29 @@ export class QnScaleAdapter
   /** Timer handle for the pending stored-data re-query. */
   private storedRetryTimer: ReturnType<typeof setTimeout> | null = null;
 
+  /**
+   * The advertisement this session matched on flags the resistance as
+   * scrambled (#461, see SCRAMBLE_FLAG_BIT). Set in onConnected, before
+   * anything is written, so it is in place before any frame with a resistance
+   * can arrive: the scale sends those only after the handshake.
+   */
+  private resistanceScrambled = false;
+
+  /** One "unscrambled impedance is not a body" warning per session (#461). */
+  private unscrambledImplausibleWarned = false;
+
   /** Receive the configured display unit from the composition root (#269). */
   configure(opts: AdapterRuntimeConfig): void {
     if (opts.displayUnit) this.displayUnit = opts.displayUnit;
     this.forcedProtocolType = opts.qnProtocolByte ?? null;
     this.forcedReportByte = opts.qnReportByte ?? null;
+    if (this.forcedReportByte !== null) {
+      bleLog.warn(
+        `QN: ble.qn_report_byte is set (${this.forcedReportByte}), so every QN session sends ` +
+          'the frame that deletes the user slots its bits select on the scale. Remove the ' +
+          'setting unless your scale stopped reporting without it (#461).',
+      );
+    }
     this.forcedWeightAck = opts.qnWeightAck ?? null;
     this.a4PreludeEnabled = opts.qnA4Prelude === true;
     this.timeSyncLong = opts.qnTimeSyncLong === true;
@@ -399,10 +476,16 @@ export class QnScaleAdapter
     this.sessionStartedScaleSeconds = Math.floor(Date.now() / 1000) - SCALE_EPOCH_OFFSET;
     this.anchorFallbackWarned = false;
     this.twentyByteFrameLogged = false;
+    this.live20Seen = false;
+    this.live20Weight = null;
+    this.live20ResultSeen = false;
+    this.live20Byte2Warned = false;
     this.configSent = false;
     this.timeSyncSent = false;
     this.historyResponseSent = false;
     this.storedQueryAttempts = 0;
+    this.resistanceScrambled = false;
+    this.unscrambledImplausibleWarned = false;
     if (this.fallbackTimer) {
       clearTimeout(this.fallbackTimer);
       this.fallbackTimer = null;
@@ -425,6 +508,7 @@ export class QnScaleAdapter
    */
   async onConnected(ctx: ConnectionContext): Promise<void> {
     this.ctx = ctx;
+    this.readImpedanceFlag(ctx);
     // The session clock is re-stamped here as well as in onSessionStart, for a
     // caller that drives onConnected directly (a test, or a transport that
     // predates the hook).
@@ -521,9 +605,54 @@ export class QnScaleAdapter
     }
 
     if (!this.historyResponseSent) {
-      bleLog.debug('QN: fallback: sending history + start');
+      bleLog.debug('QN: fallback: sending the profile frame + start');
       await this.handleConfigRequest();
     }
+  }
+
+  /** Read the impedance flag from the session's advertisement (#461). */
+  private readImpedanceFlag(ctx: ConnectionContext): void {
+    const traits = qnAdvertTraits(ctx.manufacturerData, ctx.deviceAddress);
+    this.resistanceScrambled = traits?.scrambled === true;
+    if (!ctx.manufacturerData) {
+      bleLog.debug('QN: no advertisement for this session, impedance read as sent (#461)');
+    } else if (!traits) {
+      bleLog.debug(
+        `QN: advertisement (company 0x${ctx.manufacturerData.id.toString(16).padStart(4, '0')}) ` +
+          'is not a QN one for this device, impedance read as sent (#461)',
+      );
+    } else if (traits.category === null) {
+      bleLog.debug(
+        'QN: advertisement has no scrambling model marker, impedance read as sent (#461)',
+      );
+    } else {
+      bleLog.debug(
+        `QN: advertisement model ${traits.category}, impedance ` +
+          (traits.scrambled
+            ? 'scrambled: unscrambling it as the vendor SDK does (#461)'
+            : 'not scrambled (#461)'),
+      );
+    }
+  }
+
+  /**
+   * The resistance a frame carries, unscrambled when the advertisement said so
+   * (see SCRAMBLE_FLAG_BIT). Untouched otherwise, so a scale that does not set
+   * the flag gets exactly the bytes it sent.
+   */
+  private resistance(raw: number): number {
+    if (!this.resistanceScrambled || raw === 0) return raw;
+    const unscrambled = decryptQnResistance(raw);
+    const value = unscrambled >= NO_CONTACT_RESISTANCE ? 0 : unscrambled;
+    bleLog.debug(`QN: impedance ${raw} unscrambled to ${value} Ohm (#461)`);
+    if (value !== 0 && !isPlausibleImpedance(value) && !this.unscrambledImplausibleWarned) {
+      this.unscrambledImplausibleWarned = true;
+      bleLog.warn(
+        `QN: this scale advertises a scrambled impedance, and unscrambling ${raw} gives ` +
+          `${value} Ohm, which is not a body. Please report this log on #461.`,
+      );
+    }
+    return value;
   }
 
   /** See matching.ts. Pure over the advertisement, so it lives outside the class. */
@@ -645,8 +774,10 @@ export class QnScaleAdapter
    *   0x12 (scale info) -> AE01 init + 0x13 config with echoed protocol type
    *   0x14 (ready ACK)  -> 0x20 time sync + A2 user profile + "pass" auth
    *                        (no A2 on the 19-byte dialect with ble.qn_weight_ack)
-   *   0x21 (config req)  -> A00D history responses + 0x22 start
+   *   0x21 (config req)  -> A00D profile frame + 0x22 start
    *   0x10 (weight)      -> parse weight (original or ES-30M format)
+   *                        (19-byte dialect: 20-byte stream, weight held until
+   *                        its 0x16, nothing written back, D037)
    *
    * State machine writes are fire-and-forget (async, not awaited) so they
    * don't block the synchronous parseNotification return.
@@ -735,9 +866,9 @@ export class QnScaleAdapter
       return null;
     }
 
-    // 0x21: config request, respond with A00D history frames + start measurement
+    // 0x21: config request, respond with the A00D profile frame + start measurement
     if (opcode === 0x21) {
-      bleLog.debug('QN: config request, sending history response + start');
+      bleLog.debug('QN: config request, sending the profile frame + start');
       void this.handleConfigRequest();
       return null;
     }
@@ -749,36 +880,63 @@ export class QnScaleAdapter
 
     // 0x23: stored measurement record returned after the 0x22 history query.
     // V10 Renpho / ES-CS20M firmware delivers the weigh-in here, not reliably
-    // via live 0x10 frames (#213 / #75). Layout from openScale QNHandler:
-    //   [6-9]   record timestamp, LE uint32 (2000-epoch seconds)
-    //   [10-11] weight, BE uint16, / 100 kg
-    //   [13-14] primary resistance R1, LE uint16
-    //   [15-16] secondary resistance R2, LE uint16
+    // via live 0x10 frames (#213 / #75). Layout in decodeStoredRecord: R50 and
+    // R500 big-endian at [12..13] and [14..15], as the vendor SDK reads them
+    // (#461), not openScale's little-endian [13..14] and [15..16].
+    //
+    // A session that positively identified a classic scale (a short 0x12)
+    // keeps the old offsets. Classic firmware has a different 0x23 layout
+    // altogether, the record time included, so its records fail the freshness
+    // check below as stale; changing how they are read is a separate change
+    // with its own evidence. A session without any 0x12 reads the long layout,
+    // which is what every real record we have uses.
     if (opcode === 0x23) {
-      if (data.length < 17) {
+      // On the 19-byte dialect `23 00 .. 00 23` comes after the 20-byte stream,
+      // 13 s after the stable weight and 200 ms before the result block (#331),
+      // so it reads as the end of the scale's BIA. As a record it is an empty
+      // one, and the re-query that triggers is START, sent 3 s later into a
+      // finished weigh-in. Only that exact shape is the marker; any other 0x23
+      // keeps the stored-record path below.
+      if (this.isNineteenByteInfo && this.live20Seen) {
+        if (this.isEndOfMeasurementMarker(data)) {
+          bleLog.debug(
+            'QN: 0x23 end-of-measurement marker after the 20-byte stream, no re-query (#331)',
+          );
+          return null;
+        }
+        bleLog.debug(
+          'QN: 0x23 after the 20-byte stream is not the end-of-measurement marker, ' +
+            'reading it as a stored record (#331)',
+        );
+      }
+      const record = data.length < 17 ? null : decodeStoredRecord(data);
+      if (!record) {
         this.scheduleStoredDataRetry();
         return null;
       }
-      const weight = data.readUInt16BE(10) / 100;
+      const { weight, recordSeconds } = record;
       if (weight <= 5 || weight >= 300) {
         this.scheduleStoredDataRetry();
         return null;
       }
-      const recordSeconds = data.readUInt32LE(6);
       const sessionSeconds =
         this.sessionStartedScaleSeconds ?? Math.floor(Date.now() / 1000) - SCALE_EPOCH_OFFSET;
       if (recordSeconds + MAX_STORED_RECORD_AGE_SEC < sessionSeconds) {
         this.scheduleStoredDataRetry();
         return null;
       }
-      const r1 = data.readUInt16LE(13);
-      const r2 = data.readUInt16LE(15);
+      const classic = this.scaleFactorKnown && !this.isLongFrameVariant;
+      const r1 = classic ? data.readUInt16LE(13) : record.r50;
+      const r2 = classic ? data.readUInt16LE(15) : record.r500;
       if (this.storedRetryTimer) {
         clearTimeout(this.storedRetryTimer);
         this.storedRetryTimer = null;
       }
-      bleLog.debug(`QN: stored 0x23 reading ${weight}kg / ${r1 > 0 ? r1 : r2}Ω`);
-      return { weight, impedance: r1 > 0 ? r1 : r2 };
+      bleLog.debug(
+        `QN: stored 0x23 reading ${weight}kg, R50 ${r1} / R500 ${r2}` +
+          (classic ? ' (classic offsets)' : ''),
+      );
+      return { weight, impedance: this.resistance(r1 > 0 ? r1 : r2) };
     }
 
     // Extended-dialect completed-weigh-in result frames (#235). Gated to the
@@ -792,6 +950,24 @@ export class QnScaleAdapter
       // the repeated 0xB4s, the 0xB1 03 02/03 records — so they are consumed
       // quietly instead of re-logged as ignored frames.
       return reading;
+    }
+
+    // The 19-byte dialect's weigh-in stream (#331, D037). Gated on the dialect
+    // explicitly: the GE CS 10 G's live frame has the identical 20-byte shape
+    // and stays on the logged-and-dropped path below. 0x15/0x16 only count
+    // after the stream, so elsewhere they still reach the ignore branch.
+    if (this.isNineteenByteInfo) {
+      if (opcode === 0x10 && data.length === LIVE20_FRAME_LEN && data[1] === LIVE20_FRAME_LEN) {
+        return this.parseNineteenByteLiveFrame(data);
+      }
+      if (
+        this.live20Seen &&
+        (opcode === RESULT16_OPCODE_COMPOSITION || opcode === RESULT16_OPCODE_DONE) &&
+        data.length === RESULT16_FRAME_LEN &&
+        data[1] === RESULT16_FRAME_LEN
+      ) {
+        return this.parseNineteenByteResultFrame(data);
+      }
     }
 
     // 0x10: live weight frame.
@@ -862,10 +1038,12 @@ export class QnScaleAdapter
     //   10 14 01 00 11 22 79 00 .. 00 d1   Arboleaf, 88.25 kg (#331)
     //   10 14 01 00 11 1e be 00 .. 00 12   GE CS 10 G, 78.70 kg (#235)
     //
-    // Neither branch above reads it. [4] is 0x11, so it falls into the original
-    // layout, which takes the weight from [3..4] and gets 0x0011. What [4] and
-    // the stability flag mean in this layout is not decoded yet, so the frame is
-    // logged once per session with the weight where the captures put it.
+    // On the 19-byte dialect the frame is decoded above (parseNineteenByteLiveFrame)
+    // and never gets here. Elsewhere neither branch above reads it. [4] is 0x11,
+    // so it falls into the original layout, which takes the weight from [3..4]
+    // and gets 0x0011. Whether the GE frame shares the Arboleaf status and part
+    // bytes is not known, so there it is still logged once per session with the
+    // weight where the captures put it.
     const twentyByteLive = data.length === 20 && data[1] === 0x14;
     if (twentyByteLive && !this.twentyByteFrameLogged) {
       this.twentyByteFrameLogged = true;
@@ -896,11 +1074,13 @@ export class QnScaleAdapter
     //
     // Never sent for the 20-byte layout above. Read through the original layout
     // its rawWeight is 0x0011, so the echo handed the scale `a2 06 01 00 11 ba`,
-    // i.e. 0.17 kg, on every live frame; that path returns above now. Whether
-    // the app echoes this shape at all is not known, so a 20-byte frame on the
-    // ES-30M branch is not echoed either. The 14-byte ES-30M and 10-byte classic
-    // frames keep it: their offsets are right. Sent before the stability gate,
-    // fire and forget, like the 0x1F stable ACK below.
+    // i.e. 0.17 kg, on every live frame; that path returns above now, and the
+    // 19-byte dialect's decode writes nothing at all, since its one complete
+    // weigh-in arrived without an echo or a 0x1F (#331). Whether the app echoes
+    // this shape at all is not known, so a 20-byte frame on the ES-30M branch is
+    // not echoed either. The 14-byte ES-30M and 10-byte classic frames keep it:
+    // their offsets are right. Sent before the stability gate, fire and forget,
+    // like the 0x1F stable ACK below.
     if (this.weightAckEnabled() && this.ctx && !twentyByteLive) {
       void this.writeCmd(buildA2Frame(rawWeight));
     }
@@ -911,7 +1091,7 @@ export class QnScaleAdapter
     if (weight === null) return null;
 
     // R1 (primary BIA resistance) and R2 (secondary)
-    const impedance = r1 > 0 ? r1 : r2;
+    const impedance = this.resistance(r1 > 0 ? r1 : r2);
 
     // Reset the impedance grace timer on successful reading
     this.firstStableNoImpedanceAt = null;
@@ -1000,12 +1180,10 @@ export class QnScaleAdapter
   private parseExtendedResultFrame(data: Buffer): ScaleReading | null {
     if (this.extendedResultEmitted) return null;
 
-    // Standard QN trailing checksum: sum of every byte but the last, mod 256.
-    // Verified against every captured 0xB4/0xB1 frame; a cheap guard against a
-    // truncated or mis-framed notification being read as a weight.
-    let sum = 0;
-    for (let i = 0; i < data.length - 1; i++) sum = (sum + data[i]) & 0xff;
-    if (sum !== data[data.length - 1]) return null;
+    // Standard QN trailing checksum, verified against every captured 0xB4/0xB1
+    // frame; a cheap guard against a truncated or mis-framed notification being
+    // read as a weight.
+    if (!hasValidSumChecksum(data)) return null;
 
     let rawWeight: number | null = null;
     if (data[0] === RESULT_OPCODE_B1 && data.length >= 7 && data[2] === 0x03 && data[3] === 0x01) {
@@ -1051,6 +1229,120 @@ export class QnScaleAdapter
         '(impedance sweep not yet calibrated, emitting weight-only) #235',
     );
     return { weight, impedance: 0 };
+  }
+
+  /**
+   * One 20-byte 0x10 frame of the 19-byte dialect (#331, D037); layout at
+   * LIVE20_FRAME_LEN. The stable weight comes back provisional, so the session
+   * holds the link through the scale's BIA (isFinal, completionHoldMs).
+   *
+   * Writes nothing. The one log of a complete weigh-in got there without a
+   * 0x1F or an A2 echo, and nobody has seen what the vendor app answers here.
+   */
+  private parseNineteenByteLiveFrame(data: Buffer): ScaleReading | null {
+    if (!hasValidSumChecksum(data)) {
+      bleLog.debug('QN: 20-byte frame with a bad checksum dropped (#331)');
+      return null;
+    }
+    this.live20Seen = true;
+
+    const total = data[4] >> 4;
+    const index = data[4] & 0x0f;
+    if (total === 0 || index === 0 || index > total) {
+      bleLog.debug(
+        `QN: 20-byte frame with part byte 0x${data[4].toString(16).padStart(2, '0')} dropped (#331)`,
+      );
+      return null;
+    }
+    // A continuation part's [2..3] is payload, so the checks below are for the
+    // first part only.
+    if (index > 1) {
+      bleLog.debug(
+        `QN: 20-byte result part ${index}/${total} (segmental impedance block, not decoded, #331)`,
+      );
+      return null;
+    }
+
+    // [2] is 0x01 on every captured first part. If it is a unit (lb on the
+    // display, say), the weight field may not be kg*100 at all, so a different
+    // value is reported rather than guessed at.
+    if (data[2] !== LIVE20_FIRST_PART_BYTE2) {
+      if (!this.live20Byte2Warned) {
+        this.live20Byte2Warned = true;
+        bleLog.warn(
+          `QN: 20-byte weight frame with 0x${data[2].toString(16).padStart(2, '0')} at [2] ` +
+            'where every capture has 0x01, so its weight is not read. Please attach a ' +
+            'DEBUG log to #331.',
+        );
+      }
+      return null;
+    }
+
+    const status = data[3];
+    const weight = data.readUInt16BE(5) / 100;
+    if (!this.twentyByteFrameLogged) {
+      this.twentyByteFrameLogged = true;
+      bleLog.debug(
+        `QN: 20-byte live frame, weight ${weight} kg at [5..6], ` +
+          `status 0x${status.toString(16).padStart(2, '0')} (19-byte dialect, #331)`,
+      );
+    }
+    if (status === LIVE20_STATUS_MEASURING) return null;
+    if (status !== LIVE20_STATUS_STABLE && status !== LIVE20_STATUS_RESULT) {
+      bleLog.debug(`QN: 20-byte frame with unknown status 0x${status.toString(16)} dropped (#331)`);
+      return null;
+    }
+    if (weight <= RESULT_MIN_WEIGHT_KG || weight >= RESULT_MAX_WEIGHT_KG) {
+      bleLog.debug(`QN: 20-byte stable weight ${weight} kg out of range, dropped (#331)`);
+      return null;
+    }
+
+    // The result block's first part (status 0x02) repeats the weight. Returning
+    // it too keeps the hold armed if the single stable frame was lost on a proxy
+    // link; once armed, a second held reading does not move the window.
+    this.live20Weight = weight;
+    const reading: ScaleReading = { weight, impedance: 0 };
+    this.provisionalReadings.add(reading);
+    bleLog.debug(
+      `QN: 20-byte stable weight ${weight} kg, holding for the result frames; ` +
+        'stay on the scale until its display shows the results (#331)',
+    );
+    return reading;
+  }
+
+  /**
+   * 0x15/0x16 after the 19-byte dialect's stream (#331, D037). Neither is
+   * decoded. 0x16 is the last frame of the weigh-in, so it is what publishes
+   * the held weight; the reading is a new object and therefore final.
+   */
+  private parseNineteenByteResultFrame(data: Buffer): ScaleReading | null {
+    if (!hasValidSumChecksum(data)) {
+      bleLog.debug(`QN: 0x${data[0].toString(16)} frame with a bad checksum dropped (#331)`);
+      return null;
+    }
+    if (data[0] === RESULT16_OPCODE_COMPOSITION) {
+      bleLog.debug('QN: 0x15 vendor composition frame, not decoded (#331)');
+      return null;
+    }
+    this.live20ResultSeen = true;
+    if (this.live20Weight === null) {
+      bleLog.debug('QN: 0x16 closes a 19-byte weigh-in that sent no stable weight (#331)');
+      return null;
+    }
+    bleLog.debug(
+      `QN: 0x16 closes the 19-byte weigh-in, publishing ${this.live20Weight} kg weight-only ` +
+        '(impedance block not decoded, #331)',
+    );
+    return { weight: this.live20Weight, impedance: 0 };
+  }
+
+  /** `23 00 .. 00 23`: 20 bytes, all zero between opcode and checksum (#331). */
+  private isEndOfMeasurementMarker(data: Buffer): boolean {
+    return (
+      data.length === LIVE20_FRAME_LEN &&
+      data.subarray(1, data.length - 1).every((b) => b === 0) &&
+      hasValidSumChecksum(data)
+    );
   }
 
   // ── State machine handlers (fire-and-forget from parseNotification) ─────
@@ -1166,7 +1458,7 @@ export class QnScaleAdapter
     await this.writeAe01([0x02, 0x70, 0x61, 0x73, 0x73]);
   }
 
-  /** Respond to 0x21 (config request) with A00D history frames + 0x22 start measurement. */
+  /** Respond to 0x21 (config request) with the A00D profile frame + 0x22 start measurement. */
   private async handleConfigRequest(): Promise<void> {
     if (this.historyResponseSent) return;
     this.historyResponseSent = true;
@@ -1179,34 +1471,35 @@ export class QnScaleAdapter
     const gen = this.sessionGeneration;
     const live = (): boolean => gen === this.sessionGeneration;
 
-    // A00D response 1 (from openScale QNHandler). byte[3] is the payload byte
-    // `ble.qn_report_byte` overrides; see REPORT_BYTE_DEFAULT and
-    // REPORT_BYTE_LONG_FRAME.
-    const isLongFrame = this.isExtendedLongFrame || this.isLongFrameVariant;
-    const dialectDefault = isLongFrame ? REPORT_BYTE_LONG_FRAME : REPORT_BYTE_DEFAULT;
-    const msg1 = [
-      0xa0,
-      0x0d,
-      0x04,
-      this.forcedReportByte ?? dialectDefault,
-      0x00,
-      0x00,
-      0x00,
-      0x00,
-      0x00,
-      0x00,
-      0x00,
-      0x00,
-      0x00,
-    ];
-    msg1[12] = msg1.reduce((a, b) => a + b, 0) & 0xff;
-    bleLog.debug(
-      `QN: history response byte 0x${msg1[3].toString(16).padStart(2, '0')}` +
-        (this.forcedReportByte !== null
-          ? ` (forced; dialect default 0x${dialectDefault.toString(16)})`
-          : ` (dialect default)`),
-    );
-    await this.writeCmd(msg1);
+    // The A00D user-delete frame (openScale's "history response") goes out only
+    // when `ble.qn_report_byte` asks for it, with that byte as the slot mask;
+    // see USER_DELETE_SUBCOMMAND (#461). The 200 ms that followed it stays, so
+    // nothing else in the sequence moves in time.
+    if (this.forcedReportByte !== null) {
+      const deleteUsers = [
+        0xa0,
+        0x0d,
+        USER_DELETE_SUBCOMMAND,
+        this.forcedReportByte,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+      ];
+      deleteUsers[12] = deleteUsers.reduce((a, b) => a + b, 0) & 0xff;
+      bleLog.debug(
+        `QN: sending the A00D user-delete frame with mask ` +
+          `0x${this.forcedReportByte.toString(16).padStart(2, '0')} (ble.qn_report_byte, #461)`,
+      );
+      await this.writeCmd(deleteUsers);
+    } else {
+      bleLog.debug('QN: A00D user-delete frame not sent (ble.qn_report_byte unset, #461)');
+    }
 
     await wait(200);
     if (!live()) return;

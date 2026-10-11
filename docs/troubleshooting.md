@@ -202,12 +202,14 @@ In continuous mode the wait between scans depends on how the previous cycle ende
 - **A reading arrived:** `runtime.scan_cooldown` (default 30 s), and at least 25 s on Linux/BlueZ regardless, so the app does not reconnect while the scale is still advertising.
 - **No scale found, radio healthy:** `runtime.idle_rescan_delay` (default 5 s). Linux/BlueZ only; the other transports cannot tell this case from a failure and use the backoff below.
 - **The cycle failed** (a GATT error, a wedged controller, an export that threw): 5 s, then 10, 20, 40 and 60 s for as long as failures continue, resetting on the next success.
+- **The scale connected but no reading came in time** (the reading session timed out after connecting): the same backoff as a failure. The scale was found, so the log says so instead of "No scale found".
 
 So a gap of a minute between scans means failures, not a setting being ignored. The log line says which case it was:
 
 ```
 No scale found, rescanning in 5s... (Device not found)
 No scale found, retrying in 20s... (le-connection-abort-by-local)
+Scale connected but sent no reading, retrying in 60s... (Timed out waiting for a complete scale reading)
 ```
 
 ## Debug Mode
@@ -390,6 +392,8 @@ Two things to know before you do. The capability is on the `btmgmt` file, so **e
 **Auto-restart watchdog (continuous mode).** When in-process recovery is not enough (typically Pi 3/4 Broadcom firmware lock-up), a watchdog exits the process after `runtime.watchdog_max_consecutive_failures` consecutive scan failures (default `10`, ≈30 min). With Docker `restart: unless-stopped` the container restarts cleanly, the entrypoint resets the BT adapter, and the controller is typically unwedged. The watchdog only arms after the first successful weigh-in in the process lifetime, so it does not restart-loop the container if the scale is offline (vacation) or `scale_mac` is misconfigured.
 
 The watchdog counts only cycles where the Bluetooth radio looks unhealthy: a connection or read failure, or a scan that saw no advertisement traffic at all (the zombie-discovery wedge). A normal idle cycle, where the radio still hears other nearby devices but your scale simply is not being stood on, does not count toward a restart. This is why a scale that only advertises while in use (such as Renpho) no longer triggers needless restarts overnight.
+
+A cycle that connected to the scale and then timed out without a reading counts only if the scale sent nothing at all in that session. Some scales, such as the Beurer BF915, stay connectable long after a weigh-in; if the scale answered, the Bluetooth path is evidently working and the cycle does not count, though it still waits the normal failure backoff before the next scan. This applies to Linux/BlueZ (`node-ble`); on the other native handlers every such timeout still counts.
 
 ::: warning The watchdog recovers by **exiting the process** - set a restart policy
 The recovery is the process _exiting_ so the supervisor starts it again. You **must** run with `restart: unless-stopped` (Compose) or `--restart unless-stopped` (`docker run`). Without a restart policy the container just stops.

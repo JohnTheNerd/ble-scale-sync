@@ -23,7 +23,6 @@ version: 1
 #   preemptive_adapter_reset: false   # Linux node-ble: skip the btmgmt power-cycle after each session (default true)
 #   adapter_privacy: true             # Linux node-ble: LE privacy so Beurer scales keep the pairing (adapter-wide, see docs)
 #   qn_protocol_byte: 0               # QN scales only: 0 to 255, see below
-#   qn_report_byte: 252               # QN scales only: 0 to 255, see below
 #
 # scale_mac: omit for auto-discovery. On macOS, use the CoreBluetooth UUID.
 # noble_driver: default is node-ble (Linux), abandonware (Windows), stoprocent (macOS).
@@ -45,9 +44,11 @@ version: 1
 #          protocol byte the handshake echoes back to the scale. Set it only when a QN scale
 #          connects, completes the whole handshake in the debug log and then never reports a
 #          weight. Try 0, or 255, or the value the "QN: scale info" log line reports.
-# qn_report_byte: QN-family scales only, and only worth trying after qn_protocol_byte did not
-#          help. Payload byte of the history-response frame, default 254 (0xFE). Vendor-app
-#          captures of a GE CS 10 G and an Arboleaf QN-Scale both send 252 (0xFC) instead.
+# qn_report_byte: QN-family scales only. Leave it unset: it deletes data on the scale. When
+#          set, every connection sends the command that deletes the user slots this mask
+#          selects (252 = slots 3 to 8, 254 = slots 2 to 8), which can remove other people's
+#          users on a shared scale. Only for a scale that stopped reporting without it; see
+#          the configuration guide.
 #
 # --- ESP32 MQTT Proxy (when handler: mqtt-proxy) ---
 #   mqtt_proxy:
@@ -103,7 +104,8 @@ users:
     # beurer_user_index: 1                # scale user slot the code belongs to
     # beurer_provision: false             # write this profile into a scale that has none stored
 
-    # Per-user exporters (optional, override global_exporters for this user):
+    # Per-user exporters (optional). They are added to global_exporters; a type
+    # listed here replaces the global entry of that type for this user.
     # exporters:
     #   - type: garmin
     #     email: alice@example.com
@@ -116,6 +118,18 @@ users:
     #   - type: intervals
     #     athlete_id: i123456                # Intervals.icu Settings → Developer
     #     api_key: "${INTERVALS_API_KEY}"
+    #   - type: dreeve
+    #     base_url: https://dreeve.example   # your Dreeve APP_URL (Dreeve 5.3.3 or newer)
+    #     token: "${DREEVE_TOKEN}"           # key from Settings -> Security -> API access
+    #     unit_system: metric                # metric | imperial, as Settings -> Appearance
+    #   - type: wger                         # self-hosted weight/workout manager
+    #     base_url: https://wger.de          # your instance URL
+    #     token: "${WGER_TOKEN}"             # API key from <base_url>/en/user/api-key
+    #     sync_measurements: true            # also push body fat/water/muscle/bone
+    #   - type: healthlog                    # self-hosted health tracker
+    #     base_url: https://healthlog.example  # your instance URL
+    #     token: "${HEALTHLOG_TOKEN}"        # Measurement ingest token (Settings -> API & Tokens)
+    #     sync_measurements: true            # also push body fat/water/muscle/bone/visceral
 
   - name: Bob
     slug: bob
@@ -127,7 +141,8 @@ users:
     last_known_weight: 85.5
 
 # --- Global Exporters ---
-# Shared by all users (unless a user defines their own "exporters" list).
+# Shared by all users; a user's own exporter of the same type replaces the global
+# one for that user.
 # All enabled exporters run in parallel.
 
 global_exporters:
@@ -190,18 +205,6 @@ global_exporters:
   # - type: file
   #   file_path: "./measurements.csv"      # path to output file
   #   format: csv                          # "csv" or "jsonl"
-
-  # -- Wger (self-hosted weight/workout manager) --
-  # - type: wger
-  #   base_url: https://wger.de            # your instance URL
-  #   token: "${WGER_TOKEN}"               # API key from <base_url>/en/user/api-key
-  #   sync_measurements: true              # also push body fat/water/muscle/bone
-
-  # -- HealthLog (self-hosted health tracker) --
-  # - type: healthlog
-  #   base_url: https://healthlog.example  # your instance URL
-  #   token: "${HEALTHLOG_TOKEN}"          # Measurement ingest token (Settings -> API & Tokens)
-  #   sync_measurements: true              # also push body fat/water/muscle/bone/visceral
 
 # --- Runtime Settings ---
 

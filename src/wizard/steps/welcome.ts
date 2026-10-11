@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from 'node:fs';
-import { parse as parseYaml } from 'yaml';
+import { parseConfigYaml } from '../../config/yaml-parse.js';
 import type { WizardStep, WizardContext } from '../types.js';
 import { banner, dim, warn } from '../ui.js';
 import { checkForUpdate } from '../../update-check.js';
@@ -22,14 +22,20 @@ export const welcomeStep: WizardStep = {
     if (exists) {
       try {
         const raw = readFileSync(ctx.configPath, 'utf8');
-        const parsed: unknown = parseYaml(raw);
+        // The app's own parser: its error and warning text never quote the
+        // line, which may hold a password.
+        const parsed: unknown = parseConfigYaml(raw, ctx.configPath);
         if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
           unreadable = 'it does not contain a YAML mapping';
         } else if ((parsed as { update_check?: unknown }).update_check === false) {
           updateCheckEnabled = false;
         }
       } catch (err) {
-        unreadable = err instanceof Error ? err.message.split('\n')[0] : String(err);
+        // Without its own final period: the line below adds one.
+        unreadable = (err instanceof Error ? err.message.split('\n')[0] : String(err)).replace(
+          /\.$/,
+          '',
+        );
       }
     }
 

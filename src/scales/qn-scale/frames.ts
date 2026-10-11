@@ -1,5 +1,5 @@
 /**
- * Pure frame builders for the QN family.
+ * Pure frame builders and decoders for the QN family.
  *
  * Every one of these is byte-pinned by tests against a real capture, so they
  * are the safest thing in the adapter to change and the most dangerous thing to
@@ -133,6 +133,79 @@ export function buildTimeSync(protocolType: number, seconds: number, long = fals
   ];
   if (long) body.push(TIME_SYNC_TRAILER);
   return [...body, body.reduce((a, b) => a + b, 0) & 0xff];
+}
+
+/**
+ * The family's trailing checksum: the sum of every byte but the last, mod 256.
+ * Pure helper; the captured 0xB4/0xB1 frames and the 19-byte dialect's
+ * weigh-in frames all close under it.
+ */
+export function hasValidSumChecksum(data: Buffer | readonly number[]): boolean {
+  if (data.length < 2) return false;
+  let sum = 0;
+  for (let i = 0; i < data.length - 1; i++) sum = (sum + data[i]) & 0xff;
+  return sum === data[data.length - 1];
+}
+
+/** One 0x23 stored record, as decodeStoredRecord reads it. */
+export interface StoredRecord {
+  /** kg */
+  weight: number;
+  /** Scale-epoch seconds (2000-01-01) the record was written at. */
+  recordSeconds: number;
+  /** Raw resistance at 50 kHz, as the frame carries it. */
+  r50: number;
+  /** Raw resistance at 500 kHz, as the frame carries it. */
+  r500: number;
+}
+
+/**
+ * Decode a 0x23 stored record in the layout of the long-frame scales (#461):
+ *
+ *   [3]       record count, [4] record index, [5] user slot (0xf0 = none)
+ *   [6..9]    time written, LE u32, seconds since 2000-01-01
+ *   [10..11]  weight, BE u16, /100 kg
+ *   [12..13]  R50, BE u16
+ *   [14..15]  R500, BE u16
+ *
+ * This is the layout the vendor's published Android SDK (qnsdkX 2.37.2) reads
+ * for these scales, and three real records agree: #213 (504/502), #75
+ * (507/505) and #461 (4303/4301). openScale reads both resistances
+ * little-endian one byte later, which lands on the right R50 only because
+ * R50 and R500 share their high byte; its R500 is the low byte of R500 and a
+ * zero (246, 249 and 205 on those records). Classic scales use a different
+ * layout and are not read through this. Null below 16 bytes.
+ */
+export function decodeStoredRecord(data: Buffer): StoredRecord | null {
+  if (data.length < 16) return null;
+  return {
+    weight: data.readUInt16BE(10) / 100,
+    recordSeconds: data.readUInt32LE(6),
+    r50: data.readUInt16BE(12),
+    r500: data.readUInt16BE(14),
+  };
+}
+
+/** Exchange bits `i` and `j` of a byte. */
+function swapBits(b: number, i: number, j: number): number {
+  return ((b >> i) & 1) === ((b >> j) & 1) ? b : b ^ ((1 << i) | (1 << j));
+}
+
+/** One byte of a scrambled resistance: bits 3 and 5, then 0 and 4, exchanged. */
+function unscrambleByte(b: number): number {
+  return swapBits(swapBits(b & 0xff, 3, 5), 0, 4);
+}
+
+/**
+ * Unscramble a u16 resistance from a scale whose advertisement flags its
+ * resistance as scrambled (see SCRAMBLE_FLAG_BIT in constants.ts, #461). Each
+ * byte is unscrambled on its own, so this is the same as unscrambling the two
+ * frame bytes and reading them big-endian. Its own inverse.
+ *
+ *   0x10cf (4303) -> 0x01f6 (502)
+ */
+export function decryptQnResistance(raw: number): number {
+  return (unscrambleByte(raw >> 8) << 8) | unscrambleByte(raw);
 }
 
 /** Age openScale's constant A00D #2 profile frame carries. */

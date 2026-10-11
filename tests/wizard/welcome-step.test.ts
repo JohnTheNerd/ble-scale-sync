@@ -43,6 +43,32 @@ describe('welcomeStep', () => {
     expect(ctx.isEditMode).toBe(true);
   });
 
+  // An unquoted password starting with '*' is read as an alias (the error names
+  // it) and one starting with '!' as a tag (the yaml library warns on stderr
+  // with the line). Neither may print the password.
+  it.each([
+    ['an alias', '*hunter2'],
+    ['a tag', '!hunter2'],
+  ])('does not print a password that YAML reads as %s', async (_name, value) => {
+    fs.writeFileSync(file, `version: 1\nusers: []\npassword: ${value}\n`);
+    const emitted = vi.spyOn(process, 'emitWarning').mockImplementation(() => {});
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const { prompts } = scriptedPrompts([[/existing config/, 'fresh']]);
+
+    await welcomeStep.run(ctxFor(file, prompts));
+
+    const printed = [
+      ...emitted.mock.calls,
+      ...vi.mocked(console.log).mock.calls,
+      ...vi.mocked(console.warn).mock.calls,
+      ...vi.mocked(console.error).mock.calls,
+    ]
+      .map((args) => args.map(String).join(' '))
+      .join('\n');
+    expect(printed).not.toContain('hunter2');
+  });
+
   // G-23: an unparseable file was offered for editing and silently became {}.
   it('does not offer edit mode for a config that cannot be parsed, and says why', async () => {
     fs.writeFileSync(file, 'users: [unclosed\n');

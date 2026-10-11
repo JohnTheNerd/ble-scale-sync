@@ -206,6 +206,14 @@ export interface ConnectionContext {
    */
   deviceName?: string;
   /**
+   * Manufacturer data of the advertisement the transport matched the device on,
+   * in the same shape as `BleDeviceInfo.manufacturerData` (company id apart,
+   * `data` without it). Absent when the transport had none. Lets an adapter
+   * read per-unit flags a scale only announces there, e.g. the QN impedance
+   * encoding (#461).
+   */
+  manufacturerData?: { id: number; data: Buffer };
+  /**
    * Set of characteristic UUIDs (normalized 32-char hex, lowercase) that were
    * actually discovered on the connected device. Adapters with `optional`
    * bindings can use this to detect firmware variants and switch behavior.
@@ -263,13 +271,11 @@ export interface AdapterRuntimeConfig {
    */
   qnProtocolByte?: number;
   /**
-   * Payload byte of the QN A00D history-response frame (`ble.qn_report_byte`).
-   *
-   * Defaults to 0xFE, the value openScale's ES-30M capture uses. Two vendor-app
-   * captures on other firmware in the family send 0xFC instead, from sessions
-   * that read successfully where this adapter saw the whole handshake
-   * acknowledged and then silence. What the byte selects is not decoded, so it
-   * is a setting rather than a changed default (#235, #75, #331).
+   * Slot mask of the QN A00D user-delete frame `a0 0d 04 <mask> ..`
+   * (`ble.qn_report_byte`). Unset, the frame is not sent at all; set, it is sent
+   * in every session with this mask, and the scale deletes the user slots the
+   * mask selects (bit i-1 = slot i). Opt-in only, for an install that stopped
+   * reporting without it (#461).
    */
   qnReportByte?: number;
   /**
@@ -279,9 +285,11 @@ export interface AdapterRuntimeConfig {
    * One reading of a vendor-app capture has the app answering each 0x10 frame
    * with `a2 06 01 <that frame's weight>` (#235). The adapter does this on the
    * 20-byte extended dialect, which is the only one that capture covers, and
-   * never for the 20-byte live frame whose layout is not decoded yet. Unset
-   * keeps that gate; true enables it on every dialect, for a scale that
-   * completes the handshake and then goes quiet; false disables it everywhere.
+   * never for a 20-byte live frame: on the 19-byte dialect that frame is read
+   * without writing anything back (#331, D037), on the extended one its layout
+   * is not decoded yet. Unset keeps that gate; true enables it on every
+   * dialect, for a scale that completes the handshake and then goes quiet;
+   * false disables it everywhere.
    *
    * True also sends the configured weight anchor: on the extended dialect in
    * the ready-time A2, on every other dialect as two A2 frames right after

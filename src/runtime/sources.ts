@@ -3,7 +3,7 @@ import type { ScaleAdapter } from '../interfaces/scale-adapter.js';
 import { resolveUserProfile } from '../config/resolve.js';
 import { ConsecutiveFailureWatchdog } from '../ble/watchdog.js';
 import { bleFailureKind, shouldCountAsWatchdogFailure } from '../ble/failure-kind.js';
-import { abortableSleep, POST_DISCONNECT_GRACE_MS } from '../ble/types.js';
+import { abortableSleep, POST_DISCONNECT_GRACE_MS, SessionTimeoutError } from '../ble/types.js';
 import { createLogger } from '../logger.js';
 import { PollReadingSource } from './poll-source.js';
 import type { ReadingSource } from './loop.js';
@@ -137,9 +137,14 @@ export async function buildReadingSource(
     source: new PollReadingSource(ctx, adapters),
     failureLogPrefix: 'No scale found',
     // A skipped connect found the scale, so "No scale found" would send the
-    // user looking in the wrong place (#417).
-    failureLogPrefixFor: (err) =>
-      bleFailureKind(err) === 'blocked' ? 'Scale found but not connected' : undefined,
+    // user looking in the wrong place (#417). So does a session that ran out
+    // of time after connecting and subscribing (#460): the scale was there,
+    // it just never completed a reading.
+    failureLogPrefixFor: (err) => {
+      if (bleFailureKind(err) === 'blocked') return 'Scale found but not connected';
+      if (err instanceof SessionTimeoutError) return 'Scale connected but sent no reading';
+      return undefined;
+    },
     // An idle cycle waits a few seconds instead of the 5 s -> 60 s failure
     // backoff (#398). Only the node-ble handler tags its failures, so on the
     // other native handlers nothing is tagged, nothing is claimed here, and the
@@ -166,6 +171,10 @@ export async function buildReadingSource(
         watchdog.recordFailure();
       } else if (bleFailureKind(err) === 'blocked') {
         log.debug('Connect skipped by a configured precondition; not counting toward watchdog');
+      } else if (bleFailureKind(err) === 'no-reading') {
+        // The scale sent frames, so the Bluetooth path works; nobody weighed
+        // in before the session timed out (#460, D041).
+        log.debug('Scale answered but sent no reading; not counting toward watchdog');
       } else {
         log.debug('Idle cycle (radio alive, scale not on); not counting toward watchdog');
       }

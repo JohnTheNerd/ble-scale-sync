@@ -1,5 +1,5 @@
 import { createLogger } from './logger.js';
-import { errMsg } from './utils/error.js';
+import { errMsg, redactSecrets } from './utils/error.js';
 import type { Exporter, ExportContext, ExportResultDetail } from './interfaces/exporter.js';
 import type { BodyComposition } from './interfaces/scale-adapter.js';
 import { cliCommand } from './cli-invocation.js';
@@ -228,8 +228,11 @@ async function runExports(
     if (value.success) {
       attempts.push({ exporter, detail: { name, ok: true } });
     } else {
-      log.error(`${name}: ${value.error}`);
-      attempts.push({ exporter, detail: { name, ok: false, error: value.error } });
+      // An exporter may build its error text without errMsg(), and this detail
+      // goes on to the retry queue file and the ntfy/telegram report.
+      const error = redactSecrets(value.error);
+      log.error(`${name}: ${error}`);
+      attempts.push({ exporter, detail: { name, ok: false, error } });
     }
   }
   return attempts;

@@ -19,6 +19,7 @@ import type { Watcher, WatcherConfig } from '../reading-source.js';
 import { bleLog, errMsg, IMPEDANCE_GRACE_MS, withTimeout, withIdleTimeout } from '../types.js';
 import { AsyncQueue } from '../async-queue.js';
 import { EsphomeProxyPool } from './pool.js';
+import { ManufacturerDataCache } from './advert.js';
 import { logTransportCapabilities } from './scan.js';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -81,6 +82,9 @@ export class ReadingWatcher implements Watcher {
    */
   private readonly lastAdvertName = new Map<string, string>();
   private static readonly MAX_CACHED_NAMES = 64;
+
+  /** For the GATT handoff only, never the match (see ManufacturerDataCache). */
+  private readonly mfgCache = new ManufacturerDataCache();
 
   /** Remember a name, and merge the remembered one into a nameless frame. */
   private withCachedName(info: BleDeviceInfo, addrLc: string): BleDeviceInfo {
@@ -186,6 +190,7 @@ export class ReadingWatcher implements Watcher {
     if (this.targetMac && addrLc !== this.targetMac) return;
 
     logAdvert(address, rawInfo);
+    this.mfgCache.remember(rawInfo, addrLc);
     const info = this.withCachedName(rawInfo, addrLc);
     const adapter = resolveAdapter(info, this.adapters);
     if (!adapter) return;
@@ -229,6 +234,7 @@ export class ReadingWatcher implements Watcher {
     const pool = this.pool;
     this.gattInFlight.add(addrLc);
     bleLog.info(`Matched: ${adapter.name} (${address}); opening GATT via ESPHome proxy`);
+    const manufacturerData = this.mfgCache.forSession(info, addrLc);
     void (async () => {
       let session: Awaited<ReturnType<typeof pool.connectGatt>> | null = null;
       // Adapter that actually drives the read; may be re-resolved below once the
@@ -269,6 +275,7 @@ export class ReadingWatcher implements Watcher {
                 this.scaleAuth,
                 onActivity,
                 info.localName,
+                manufacturerData,
               ),
             GATT_READING_IDLE_MS,
             `GATT reading timeout for ${address}`,

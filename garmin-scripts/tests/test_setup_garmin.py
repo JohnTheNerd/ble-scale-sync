@@ -13,6 +13,7 @@ only str(exc) was shown and the chained cause was dropped.
 Run: python -m unittest discover -s garmin-scripts/tests
 """
 
+import io
 import os
 import sys
 import tempfile
@@ -394,6 +395,27 @@ class TokenDirEnvTest(unittest.TestCase):
             authenticate = run_main([], cwd=here)
         self.assertTrue(authenticate.called)
         self.assertEqual(authenticate.call_args[0][2], absolute)
+
+
+class LoadConfigErrorTest(unittest.TestCase):
+    """PyYAML names an unquoted '*' or '!' value in its message; it must not be printed."""
+
+    def assert_hidden(self, value):
+        with tempfile.TemporaryDirectory() as here:
+            path = os.path.join(here, "config.yaml")
+            write(path, f"users:\n  - name: a\n    password: {value}\n")
+            with mock.patch("sys.stderr", new_callable=io.StringIO) as stderr:
+                with self.assertRaises(SystemExit):
+                    setup_garmin.load_config(path)
+        printed = stderr.getvalue()
+        self.assertNotIn("hunter2", printed)
+        self.assertIn("line 3, column 15", printed)
+
+    def test_alias(self):
+        self.assert_hidden("*hunter2")
+
+    def test_tag(self):
+        self.assert_hidden("!hunter2")
 
 
 if __name__ == "__main__":

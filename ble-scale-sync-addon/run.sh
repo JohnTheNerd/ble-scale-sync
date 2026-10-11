@@ -28,14 +28,35 @@ opt_bool_default_true() {
 opt_int() { jq -r ".$1 // $2" "$OPTIONS"; }
 # <<< option readers
 
-# Escape a string for safe YAML double-quoted output (backslash, quotes, CR, LF)
-yaml_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\r/\\r/g' | tr '\n' ' '; }
+# tests/addon-generate.test.ts runs the blocks marked here together, as the
+# generated-config path of this script, and loads what they write.
+# >>> yaml escape
+# Escape a string for a YAML double-quoted value: backslash, double quote and
+# CR are escaped, a newline becomes a space. The app also reads ${NAME} in any
+# value as an environment variable, so a ${...} in an option becomes $${...},
+# its escape for a literal one, and the value reaches the app as entered. Only
+# a ${ with a closing } is a reference; anything else is left alone, since an
+# escape the app would not undo would change the value instead. tr runs first
+# so that a newline inside ${...} cannot split it across two sed lines.
+#
+# Write the result with printf '%s\n' or a heredoc, never with echo: dash's
+# echo turns the \\ written here back into a single backslash.
+yaml_escape() {
+  printf '%s' "$1" | tr '\n' ' ' |
+    sed 's/\\/\\\\/g; s/"/\\"/g; s/\r/\\r/g; s/\${\([^}][^}]*}\)/$${\1/g'
+}
+# <<< yaml escape
 
 # ── Option checks that mirror the app's config schema ───────────────────────
 # The Supervisor only checks each option's type, and the app refuses to start
 # on a value its schema rejects. A bad value is therefore dropped here with a
 # warning, the same as the QN bytes and out_of_range below, instead of taking
 # the whole add-on down. tests/addon-run-sh.test.ts runs these on their own.
+#
+# The one exception is the Bluetooth transport: one that cannot run with the
+# options given stops the add-on with an error. Falling back to the built-in
+# adapter would scan, and power-cycle, an adapter the user chose not to use;
+# with ha-bluetooth it is the very adapter Home Assistant reads from.
 # >>> option checks
 
 # src/ble/scale-id.ts: a MAC, or a CoreBluetooth UUID (dashed or 32 hex).
@@ -60,13 +81,150 @@ valid_weight_range() {
   [ "$1" -gt 0 ] 2>/dev/null && [ "$2" -gt "$1" ] 2>/dev/null
 }
 
+# The ESPHome API library (@2colors/esphome-native-api, lib/connection.js)
+# refuses any encryption key that is not base64 of exactly 32 bytes, and it
+# does so as the client is created. Every such key is 43 base64 characters
+# and one = of padding.
+valid_esphome_key() {
+  printf '%s\n' "$1" | grep -Eq '^[A-Za-z0-9+/]{43}=$'
+}
+
 # <<< option checks
 
+# ── Bluetooth transport ─────────────────────────────────────────────────────
+# ble_transport picks how the app reaches the scale. local, the default, writes
+# no ble.handler at all, so the config is what it was before the option existed.
+# >>> ble transport
+
+ESPHOME_OPTIONS="esphome_proxy_host esphome_proxy_port esphome_proxy_encryption_key"
+MQTT_PROXY_EMBEDDED_OPTIONS="mqtt_proxy_embedded_broker_port mqtt_proxy_username mqtt_proxy_password"
+MQTT_PROXY_OPTIONS="mqtt_proxy_broker mqtt_proxy_device_id mqtt_proxy_topic_prefix $MQTT_PROXY_EMBEDDED_OPTIONS"
+
+# Names of the given transport options that differ from their defaults in the
+# add-on manifest, comma separated. Names only: some of the values are secrets.
+transport_options_set() {
+  _set=""
+  for _o in "$@"; do
+    _v=$(opt "$_o")
+    [ -n "$_v" ] || continue
+    case "$_o=$_v" in
+      esphome_proxy_port=6053 | mqtt_proxy_broker=shared | \
+        mqtt_proxy_device_id=esp32-ble-proxy | mqtt_proxy_topic_prefix=ble-proxy | \
+        mqtt_proxy_embedded_broker_port=1883)
+        continue
+        ;;
+    esac
+    _set="${_set:+$_set, }$_o"
+  done
+  printf '%s' "$_set"
+  return 0
+}
+
+# Why the chosen transport cannot run with these options, on one line, or
+# nothing. Option names only, never a value: some are secrets. Always returns
+# 0, since the caller reads the output under set -e.
+ble_transport_problem() {
+  case "$BLE_TRANSPORT" in
+    local) ;;
+    esphome-proxy)
+      if [ -z "$ESPHOME_HOST" ]; then
+        echo "ble_transport is esphome-proxy, but esphome_proxy_host is empty."
+      elif printf '%s' "$ESPHOME_HOST" | grep -q /; then
+        echo "esphome_proxy_host takes a host name or IP address, not a URL."
+      elif [ -n "$ESPHOME_KEY" ] && ! valid_esphome_key "$ESPHOME_KEY"; then
+        echo "esphome_proxy_encryption_key is not a valid ESPHome API key. Copy the 44-character key (it ends in =) from api: encryption: key: in the device's YAML."
+      fi
+      ;;
+    mqtt-proxy)
+      if [ "$MQTT_PROXY_BROKER" != "shared" ] && [ "$MQTT_PROXY_BROKER" != "embedded" ]; then
+        printf '%s\n' "mqtt_proxy_broker '$MQTT_PROXY_BROKER' is not one of shared, embedded."
+      elif printf '%s' "$MQTT_PROXY_DEVICE_ID$MQTT_PROXY_TOPIC_PREFIX" | grep -q '[+#]'; then
+        echo "mqtt_proxy_device_id and mqtt_proxy_topic_prefix cannot contain + or #."
+      elif [ "$MQTT_PROXY_BROKER" = "embedded" ] &&
+        { [ -z "$MQTT_PROXY_USERNAME" ] || [ -z "$MQTT_PROXY_PASSWORD" ]; }; then
+        echo "mqtt_proxy_broker embedded listens on this host's network, so it needs mqtt_proxy_username and mqtt_proxy_password; the ESP32 logs in with them."
+      elif [ "$MQTT_PROXY_BROKER" = "shared" ] && [ -z "$MQTT_BROKER_URL" ]; then
+        echo "ble_transport is mqtt-proxy with mqtt_proxy_broker shared, but no MQTT broker is available. Start the Mosquitto broker add-on with MQTT auto-detect on, set mqtt_broker_url, or set mqtt_proxy_broker to embedded."
+      elif [ "$MQTT_PROXY_BROKER" = "shared" ]; then
+        # The MQTT exporter takes any URL its client knows (ws://, tcp://), the
+        # proxy only these two; the app would refuse the config on every start.
+        case "$MQTT_BROKER_URL" in
+          mqtt://* | mqtts://*) ;;
+          *) echo "mqtt_proxy_broker shared needs an mqtt_broker_url that starts with mqtt:// or mqtts://." ;;
+        esac
+      fi
+      ;;
+    ha-bluetooth)
+      [ -n "$SUPERVISOR_TOKEN" ] ||
+        echo "ble_transport is ha-bluetooth, but the Supervisor gave this add-on no SUPERVISOR_TOKEN. Please report this."
+      ;;
+    *)
+      printf '%s\n' "ble_transport '$BLE_TRANSPORT' is not one of local, ha-bluetooth, esphome-proxy, mqtt-proxy."
+      ;;
+  esac
+  return 0
+}
+
+ble_transport_error() {
+  log "ERROR: $1"
+  log "Not falling back to the built-in Bluetooth adapter: fix the option above, or set ble_transport to local."
+  exit 1
+}
+
+# The ble: lines of the chosen transport, for any transport but local.
+emit_ble_transport() {
+  case "$BLE_TRANSPORT" in
+    esphome-proxy)
+      printf '%s\n' "  handler: esphome-proxy" "  esphome_proxy:" \
+        "    host: \"$(yaml_escape "$ESPHOME_HOST")\"" "    port: $ESPHOME_PORT"
+      [ -z "$ESPHOME_KEY" ] ||
+        printf '%s\n' "    encryption_key: \"$(yaml_escape "$ESPHOME_KEY")\""
+      ;;
+    mqtt-proxy)
+      printf '%s\n' "  handler: mqtt-proxy" "  mqtt_proxy:"
+      if [ "$MQTT_PROXY_BROKER" = "shared" ]; then
+        printf '%s\n' "    broker_url: \"$(yaml_escape "$MQTT_BROKER_URL")\""
+        [ -z "$MQTT_USERNAME" ] ||
+          printf '%s\n' "    username: \"$(yaml_escape "$MQTT_USERNAME")\""
+        [ -z "$MQTT_PASSWORD" ] ||
+          printf '%s\n' "    password: \"$(yaml_escape "$MQTT_PASSWORD")\""
+      else
+        # No broker_url: the app then runs its own broker, on every interface
+        # of this host (embedded_broker_bind keeps its default, 0.0.0.0).
+        printf '%s\n' "    embedded_broker_port: $MQTT_PROXY_PORT" \
+          "    username: \"$(yaml_escape "$MQTT_PROXY_USERNAME")\"" \
+          "    password: \"$(yaml_escape "$MQTT_PROXY_PASSWORD")\""
+      fi
+      [ -z "$MQTT_PROXY_DEVICE_ID" ] ||
+        printf '%s\n' "    device_id: \"$(yaml_escape "$MQTT_PROXY_DEVICE_ID")\""
+      [ -z "$MQTT_PROXY_TOPIC_PREFIX" ] ||
+        printf '%s\n' "    topic_prefix: \"$(yaml_escape "$MQTT_PROXY_TOPIC_PREFIX")\""
+      ;;
+    ha-bluetooth)
+      # Home Assistant through the Supervisor's websocket proxy, which this
+      # add-on may use because the manifest sets homeassistant_api. The token
+      # is a reference, never the value: the Supervisor issues a new one on
+      # every add-on start, and the app resolves ${...} from its environment
+      # on load. The path must be written out in full: a bare
+      # http://supervisor/core would become ws://supervisor/core.
+      printf '%s\n' '  handler: ha-bluetooth' '  ha_bluetooth:' \
+        '    url: "ws://supervisor/core/websocket"' '    token: "${SUPERVISOR_TOKEN}"'
+      ;;
+  esac
+  return 0
+}
+# <<< ble transport
+
+# >>> mode
 # Read BLE_ADAPTER early (needed for adapter reset in both modes)
 # Normalize: trim whitespace, lowercase (app schema requires /^hci\d+$/)
 BLE_ADAPTER=$(opt ble_adapter | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
 RESET_BLUETOOTH=$(opt_bool_default_true reset_bluetooth)
 CUSTOM_CONFIG=$(opt_bool custom_config)
+# Needed in both modes too: the adapter reset below is skipped for a proxy.
+BLE_TRANSPORT=$(opt ble_transport)
+[ -n "$BLE_TRANSPORT" ] || BLE_TRANSPORT=local
+# <<< mode
 
 # ── Custom config mode ──────────────────────────────────────────────────────
 
@@ -84,11 +242,13 @@ if [ "$CUSTOM_CONFIG" = "true" ]; then
   fi
   # In this mode the whole option-to-config generation below is skipped, so any
   # UI option set here does nothing. Say so for the two QN bytes specifically:
-  # they are diagnostic knobs handed to reporters who are chasing a scale that
-  # reads nothing, and someone who already moved to custom_config to set one by
-  # hand is exactly the person who would toggle the UI option, see no change and
-  # report a false negative. A wrong value for either is silent by nature, so a
-  # setting that is silently ignored is worse here than almost anywhere else.
+  # they are knobs handed to reporters who are chasing a scale that reads
+  # nothing (qn_report_byte, since #461 the mask of user slots the scale
+  # deletes, only for one that stopped reporting without it), and someone who
+  # already moved to custom_config to set one by hand is exactly the person who
+  # would toggle the UI option, see no change and report a false negative. A
+  # wrong value for either is silent by nature, so a setting that is silently
+  # ignored is worse here than almost anywhere else.
   for _qn in qn_protocol_byte qn_report_byte qn_weight_ack qn_a4_prelude \
     qn_time_sync_long qn_config_long auto_clear_stale_bond adapter_privacy; do
     if [ -n "$(opt "$_qn")" ]; then
@@ -108,12 +268,22 @@ if [ "$CUSTOM_CONFIG" = "true" ]; then
     log "WARNING: custom_config is enabled, so the 'update_check' option is ignored."
     log "Set 'update_check: false' in $CUSTOM_PATH instead."
   fi
-  # proxy_liveness_timeout_min is the one UI option that only means anything in
-  # this mode: the liveness check runs only on the proxy transports (mqtt-proxy,
-  # esphome-proxy, ha-bluetooth), and the generated config never selects one.
-  # So unlike the options above it is applied here rather than ignored, but
-  # only when the file does not set its own value, which always wins. The
-  # default (30) is the app's own default and needs no write.
+  # The transport options are named together: each of them maps to a key of a
+  # ble section in the file, not to a ble.<option> as the loop above says.
+  _transport=$(transport_options_set $ESPHOME_OPTIONS $MQTT_PROXY_OPTIONS)
+  if [ "$BLE_TRANSPORT" != "local" ]; then
+    _transport="ble_transport${_transport:+, $_transport}"
+  fi
+  if [ -n "$_transport" ]; then
+    log "WARNING: custom_config is enabled, so the transport options ($_transport) are ignored."
+    log "Set 'ble.handler' and its section (ble.esphome_proxy, ble.mqtt_proxy or ble.ha_bluetooth) in $CUSTOM_PATH instead."
+  fi
+  # proxy_liveness_timeout_min is the one UI option applied in this mode too:
+  # the liveness check runs only on the proxy transports (mqtt-proxy,
+  # esphome-proxy, ha-bluetooth), and here only the file can choose one. So
+  # unlike the options above it is applied rather than ignored, but only when
+  # the file does not set its own value, which always wins. The default (30)
+  # is the app's own default and needs no write.
   PROXY_LIVENESS_MIN=$(opt_int proxy_liveness_timeout_min 30)
   if [ "$PROXY_LIVENESS_MIN" != "30" ]; then
     _plrc=0
@@ -132,7 +302,14 @@ if [ "$CUSTOM_CONFIG" = "true" ]; then
   fi
 else
 
+  # >>> generate config
   # ── Read all options ────────────────────────────────────────────────────
+
+  # Only a hand-edited options.json gets past the Supervisor's list check.
+  case "$BLE_TRANSPORT" in
+    local | ha-bluetooth | esphome-proxy | mqtt-proxy) ;;
+    *) ble_transport_error "$(ble_transport_problem)" ;;
+  esac
 
   SCALE_MAC=$(opt scale_mac)
   FORCE_SCALE_ADAPTER=$(opt force_scale_adapter)
@@ -190,13 +367,41 @@ else
   PREEMPTIVE_ADAPTER_RESET=$(opt_bool_default_true preemptive_adapter_reset)
   ADAPTER_PRIVACY=$(opt_bool adapter_privacy)
   PROXY_LIVENESS_MIN=$(opt_int proxy_liveness_timeout_min 30)
-  # Still written below, but the generated config always runs the built-in
-  # Bluetooth transport, which has no liveness check. Say so instead of letting
-  # the option look like it did something.
-  if [ "$PROXY_LIVENESS_MIN" != "30" ]; then
-    log "NOTE: proxy_liveness_timeout_min only affects proxy transports (ESP32 or ESPHome"
-    log "proxy, HA Bluetooth), which this add-on runs only with custom_config. It has no"
-    log "effect on the built-in Bluetooth adapter."
+  # Still written below, but the built-in Bluetooth transport has no liveness
+  # check. Say so instead of letting the option look like it did something.
+  if [ "$PROXY_LIVENESS_MIN" != "30" ] && [ "$BLE_TRANSPORT" = "local" ]; then
+    log "NOTE: proxy_liveness_timeout_min only affects a proxy transport, so it has no effect with ble_transport local."
+  fi
+
+  ESPHOME_HOST=$(opt esphome_proxy_host | tr -d '[:space:]')
+  ESPHOME_PORT=$(opt_int esphome_proxy_port 6053)
+  # The ESPHome library refuses a key with as much as a trailing space.
+  ESPHOME_KEY=$(opt esphome_proxy_encryption_key | tr -d '[:space:]')
+  MQTT_PROXY_BROKER=$(opt mqtt_proxy_broker)
+  [ -n "$MQTT_PROXY_BROKER" ] || MQTT_PROXY_BROKER=shared
+  # Empty means the app's own default, the same as the manifest's.
+  MQTT_PROXY_DEVICE_ID=$(opt mqtt_proxy_device_id | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+  MQTT_PROXY_TOPIC_PREFIX=$(opt mqtt_proxy_topic_prefix | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+  MQTT_PROXY_PORT=$(opt_int mqtt_proxy_embedded_broker_port 1883)
+  MQTT_PROXY_USERNAME=$(opt mqtt_proxy_username)
+  MQTT_PROXY_PASSWORD=$(opt mqtt_proxy_password)
+
+  # The options that only steer the built-in adapter are not written for a
+  # proxy transport, which has no use for them, so that the ble: block and its
+  # condition below stay the same for every transport.
+  if [ "$BLE_TRANSPORT" != "local" ]; then
+    _host_only=""
+    [ -z "$BLE_ADAPTER" ] || _host_only="ble_adapter"
+    [ "$AUTO_CLEAR_STALE_BOND" != "true" ] || _host_only="${_host_only:+$_host_only, }auto_clear_stale_bond"
+    [ "$PREEMPTIVE_ADAPTER_RESET" != "false" ] || _host_only="${_host_only:+$_host_only, }preemptive_adapter_reset"
+    [ "$ADAPTER_PRIVACY" != "true" ] || _host_only="${_host_only:+$_host_only, }adapter_privacy"
+    if [ -n "$_host_only" ]; then
+      log "NOTE: ble_transport $BLE_TRANSPORT does not use the built-in Bluetooth adapter, so these options are ignored: $_host_only."
+    fi
+    BLE_ADAPTER=""
+    AUTO_CLEAR_STALE_BOND=false
+    PREEMPTIVE_ADAPTER_RESET=true
+    ADAPTER_PRIVACY=false
   fi
   DISPLAY_UNIT=$(opt display_unit)
 
@@ -255,7 +460,13 @@ else
 
   # ── MQTT auto-detection from HA Mosquitto add-on ──────────────────────
 
-  if [ "$MQTT_ENABLED" = "true" ] && [ "$MQTT_AUTO" = "true" ]; then
+  # The ESP32 proxy on the shared broker uses the same broker as the exporter.
+  MQTT_FOR_PROXY=false
+  if [ "$BLE_TRANSPORT" = "mqtt-proxy" ] && [ "$MQTT_PROXY_BROKER" = "shared" ]; then
+    MQTT_FOR_PROXY=true
+  fi
+  MQTT_DETECTED=false
+  if [ "$MQTT_AUTO" = "true" ] && { [ "$MQTT_ENABLED" = "true" ] || [ "$MQTT_FOR_PROXY" = "true" ]; }; then
     if [ -n "$SUPERVISOR_TOKEN" ]; then
       # The HTTP status is appended on its own line so a refusal can be told
       # apart from "no broker installed". Both used to collapse into the same
@@ -265,10 +476,26 @@ else
       # accepts the connection and never answers would otherwise hold the
       # add-on here, before the app (and its health heartbeat) ever starts. A
       # timeout reports status 000, the "did not answer" case below.
-      MQTT_RESP=$(curl -s -w '\n%{http_code}' --connect-timeout 5 --max-time 10 \
-        -H "Authorization: Bearer $SUPERVISOR_TOKEN" \
-        http://supervisor/services/mqtt 2>/dev/null || true)
-      MQTT_HTTP=$(printf '%s\n' "$MQTT_RESP" | tail -n 1)
+      #
+      # Without a broker the ESP32 proxy cannot start, and the add-on stops
+      # before its restart loop, so for the proxy a Supervisor that did not
+      # answer or failed (000, 5xx) is asked twice more. Its other answers do
+      # not change on a retry: 400 means no broker, 403 a broken build.
+      _tries=1
+      [ "$MQTT_FOR_PROXY" != "true" ] || _tries=3
+      while :; do
+        MQTT_RESP=$(curl -s -w '\n%{http_code}' --connect-timeout 5 --max-time 10 \
+          -H "Authorization: Bearer $SUPERVISOR_TOKEN" \
+          http://supervisor/services/mqtt 2>/dev/null || true)
+        MQTT_HTTP=$(printf '%s\n' "$MQTT_RESP" | tail -n 1)
+        _tries=$((_tries - 1))
+        case "$MQTT_HTTP" in
+          000 | "" | 5??) [ "$_tries" -gt 0 ] || break ;;
+          *) break ;;
+        esac
+        log "MQTT auto-detection: no answer from the Supervisor (HTTP ${MQTT_HTTP:-000}), trying again in 5s."
+        sleep 5
+      done
       MQTT_INFO=$(printf '%s\n' "$MQTT_RESP" | sed '$d')
       [ -n "$MQTT_INFO" ] || MQTT_INFO='{}'
       MQTT_HOST=$(echo "$MQTT_INFO" | jq -r '.data.host // empty' 2>/dev/null || true)
@@ -280,6 +507,7 @@ else
         MQTT_BROKER_URL="mqtt://${MQTT_HOST}:${MQTT_PORT:-1883}"
         MQTT_USERNAME="${AUTO_USER}"
         MQTT_PASSWORD="${AUTO_PASS}"
+        MQTT_DETECTED=true
         log "MQTT auto-detected: $MQTT_BROKER_URL"
       else
         # Only the error message is logged, never the body: on success the
@@ -303,6 +531,56 @@ else
       log "No SUPERVISOR_TOKEN, MQTT auto-detection unavailable"
     fi
   fi
+
+  # ── Bluetooth transport ───────────────────────────────────────────────
+
+  _problem=$(ble_transport_problem)
+  [ -z "$_problem" ] || ble_transport_error "$_problem"
+
+  # A heuristic, hence only a warning: the Mosquitto add-on maps 1883 on the
+  # host, but the mapping can be changed.
+  if [ "$BLE_TRANSPORT" = "mqtt-proxy" ] && [ "$MQTT_PROXY_BROKER" = "embedded" ] &&
+    [ "$MQTT_PROXY_PORT" = "1883" ] && [ "$MQTT_DETECTED" = "true" ]; then
+    log "WARNING: mqtt_proxy_broker embedded wants port 1883, which the Mosquitto broker add-on usually holds on this host. If the broker fails to start, use mqtt_proxy_broker shared, or another mqtt_proxy_embedded_broker_port with the same mqtt_port in the ESP32's config.json."
+  fi
+
+  _other=""
+  _unused=""
+  case "$BLE_TRANSPORT" in
+    esphome-proxy) _other=$(transport_options_set $MQTT_PROXY_OPTIONS) ;;
+    mqtt-proxy)
+      _other=$(transport_options_set $ESPHOME_OPTIONS)
+      [ "$MQTT_PROXY_BROKER" != "shared" ] ||
+        _unused=$(transport_options_set $MQTT_PROXY_EMBEDDED_OPTIONS)
+      ;;
+    *) _other=$(transport_options_set $ESPHOME_OPTIONS $MQTT_PROXY_OPTIONS) ;;
+  esac
+  if [ -n "$_other" ]; then
+    log "NOTE: these options belong to another transport than ble_transport $BLE_TRANSPORT, so they are ignored: $_other."
+  fi
+  if [ -n "$_unused" ]; then
+    log "NOTE: these options only apply to mqtt_proxy_broker embedded, so they are ignored: $_unused."
+  fi
+
+  case "$BLE_TRANSPORT" in
+    esphome-proxy)
+      _enc=unencrypted
+      [ -z "$ESPHOME_KEY" ] || _enc=encrypted
+      log "Bluetooth transport: esphome-proxy ($ESPHOME_HOST:$ESPHOME_PORT, $_enc)"
+      ;;
+    mqtt-proxy)
+      # Not the broker URL: one set by hand can carry a password.
+      if [ "$MQTT_PROXY_BROKER" = "shared" ]; then
+        _broker="shared broker"
+      else
+        _broker="embedded broker on port $MQTT_PROXY_PORT"
+      fi
+      log "Bluetooth transport: mqtt-proxy ($_broker, device ${MQTT_PROXY_DEVICE_ID:-esp32-ble-proxy})"
+      ;;
+    ha-bluetooth)
+      log "Bluetooth transport: ha-bluetooth (Home Assistant via the Supervisor, broadcast scales only)"
+      ;;
+  esac
 
   # ── Generate slug from user name ──────────────────────────────────────
 
@@ -367,10 +645,11 @@ YAML
   #
   # The value is normalised to decimal before it is written. A leading zero is
   # read as octal by any YAML 1.1 reader ("010" as 8, "064" as 52), and this
-  # file used to pass through one (PyYAML) on its way to the app. Both of these
-  # settings fail silently when wrong (every command acknowledged, no weight
-  # ever arriving), so a reporter told to try a value and typing a leading zero
-  # would run a different experiment and report a false negative. A plain
+  # file used to pass through one (PyYAML) on its way to the app. A wrong
+  # qn_protocol_byte fails silently (every command acknowledged, no weight ever
+  # arriving), and qn_report_byte is the mask of user slots the scale deletes
+  # (#461), so a value typed with a leading zero would run a different
+  # experiment, or delete different slots, without a word. A plain
   # decimal means the same thing to every reader. Surrounding whitespace is
   # trimmed for the same reason: it comes free from a text field.
   for _qn in QN_PROTOCOL_BYTE QN_REPORT_BYTE; do
@@ -412,11 +691,12 @@ YAML
     [ -n "$QN_PROTOCOL_BYTE" ] || [ -n "$QN_REPORT_BYTE" ] || [ -n "$QN_WEIGHT_ACK" ] ||
     [ -n "$QN_A4_PRELUDE" ] || [ -n "$QN_TIME_SYNC_LONG" ] || [ -n "$QN_CONFIG_LONG" ] ||
     [ "$AUTO_CLEAR_STALE_BOND" = "true" ] || [ "$PREEMPTIVE_ADAPTER_RESET" = "false" ] ||
-    [ "$ADAPTER_PRIVACY" = "true" ] || [ "$PROXY_LIVENESS_MIN" != "30" ]; then
+    [ "$ADAPTER_PRIVACY" = "true" ] || [ "$PROXY_LIVENESS_MIN" != "30" ] ||
+    [ "$BLE_TRANSPORT" != "local" ]; then
     echo "ble:" >> "$FRESH"
-    [ -n "$SCALE_MAC" ] && echo "  scale_mac: \"$(yaml_escape "$SCALE_MAC")\"" >> "$FRESH"
-    [ -n "$BLE_ADAPTER" ] && echo "  adapter: \"$(yaml_escape "$BLE_ADAPTER")\"" >> "$FRESH"
-    [ -n "$FORCE_SCALE_ADAPTER" ] && echo "  force_scale_adapter: \"$(yaml_escape "$FORCE_SCALE_ADAPTER")\"" >> "$FRESH"
+    [ -n "$SCALE_MAC" ] && printf '%s\n' "  scale_mac: \"$(yaml_escape "$SCALE_MAC")\"" >> "$FRESH"
+    [ -n "$BLE_ADAPTER" ] && printf '%s\n' "  adapter: \"$(yaml_escape "$BLE_ADAPTER")\"" >> "$FRESH"
+    [ -n "$FORCE_SCALE_ADAPTER" ] && printf '%s\n' "  force_scale_adapter: \"$(yaml_escape "$FORCE_SCALE_ADAPTER")\"" >> "$FRESH"
     [ -n "$QN_PROTOCOL_BYTE" ] && echo "  qn_protocol_byte: $QN_PROTOCOL_BYTE" >> "$FRESH"
     [ -n "$QN_REPORT_BYTE" ] && echo "  qn_report_byte: $QN_REPORT_BYTE" >> "$FRESH"
     [ -n "$QN_WEIGHT_ACK" ] && echo "  qn_weight_ack: $QN_WEIGHT_ACK" >> "$FRESH"
@@ -427,6 +707,7 @@ YAML
     [ "$PREEMPTIVE_ADAPTER_RESET" = "false" ] && echo "  preemptive_adapter_reset: false" >> "$FRESH"
     [ "$ADAPTER_PRIVACY" = "true" ] && echo "  adapter_privacy: true" >> "$FRESH"
     [ "$PROXY_LIVENESS_MIN" != "30" ] && echo "  proxy_liveness_timeout_min: $PROXY_LIVENESS_MIN" >> "$FRESH"
+    [ "$BLE_TRANSPORT" != "local" ] && emit_ble_transport >> "$FRESH"
     echo "" >> "$FRESH"
   fi
 
@@ -483,8 +764,8 @@ YAML
     ha_discovery: $MQTT_HA_DISCOVERY
     ha_device_name: "$(yaml_escape "$MQTT_HA_DEVICE_NAME")"
 YAML
-      [ -n "$MQTT_USERNAME" ] && echo "    username: \"$(yaml_escape "$MQTT_USERNAME")\"" >> "$FRESH"
-      [ -n "$MQTT_PASSWORD" ] && echo "    password: \"$(yaml_escape "$MQTT_PASSWORD")\"" >> "$FRESH"
+      [ -n "$MQTT_USERNAME" ] && printf '%s\n' "    username: \"$(yaml_escape "$MQTT_USERNAME")\"" >> "$FRESH"
+      [ -n "$MQTT_PASSWORD" ] && printf '%s\n' "    password: \"$(yaml_escape "$MQTT_PASSWORD")\"" >> "$FRESH"
     fi
 
     # Garmin exporter
@@ -518,6 +799,7 @@ update_check: $UPDATE_CHECK
 YAML
 
   log "Config generated successfully"
+  # <<< generate config
 fi
 
 # ── Merge last_known_weight from previous run ────────────────────────────────
@@ -532,6 +814,11 @@ if ! node "$ADDON_CONFIG" merge-weights "$FRESH" "$CONFIG"; then
   cp "$FRESH" "$CONFIG"
 fi
 rm -f "$FRESH"
+# The file holds passwords, and nothing above sets its mode: on the first start
+# it was created 0644 and stayed so until the app saved a weight (the app
+# writes it 0600, and later merges keep that). Only this file: a umask here
+# would also reach every file the app writes elsewhere, /share included.
+chmod 600 "$CONFIG"
 
 # ── Garmin token bootstrap ──────────────────────────────────────────────────
 # garmin_upload.py only loads tokens; it does not authenticate from email and
@@ -683,6 +970,10 @@ fi
 
 if [ "$RESET_BLUETOOTH" != "true" ]; then
   log "Bluetooth adapter reset disabled (reset_bluetooth: false)"
+elif [ "$CUSTOM_CONFIG" != "true" ] && [ "$BLE_TRANSPORT" != "local" ]; then
+  # A proxy does not use this adapter, and with ha-bluetooth a power cycle
+  # would cut off the very Bluetooth integration the transport reads from.
+  log "Bluetooth adapter reset skipped: ble_transport is $BLE_TRANSPORT, which does not use this host's adapter."
 elif ! command -v btmgmt >/dev/null 2>&1; then
   log "btmgmt not found; skipping Bluetooth adapter reset"
 elif [ "$CUSTOM_CONFIG" = "true" ] && [ -z "$BLE_ADAPTER" ]; then

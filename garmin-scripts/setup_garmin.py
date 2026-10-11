@@ -220,8 +220,29 @@ def load_config(config_path):
         print(f"Error: Config file not found: {config_path}", file=sys.stderr)
         sys.exit(1)
     except yaml.YAMLError as e:
-        print(f"Error parsing config: {e}", file=sys.stderr)
+        detail = describe_yaml_error(e, config_path)
+        print(f"Error parsing config: {detail}", file=sys.stderr)
         sys.exit(1)
+
+
+def describe_yaml_error(err, config_path):
+    """Where a YAML error is, never what is written there.
+
+    PyYAML names the offending token in some messages: an unquoted password
+    that starts with '*' comes back as "found undefined alias '<rest>'", one
+    that starts with '!' as "could not determine a constructor for the tag
+    '!<rest>'". The app's own loader (src/config/yaml-parse.ts) reports only
+    the position for the same reason: this output gets pasted into issues.
+    """
+    hint = "If that value is a password or token, put it in quotes."
+    mark = getattr(err, "problem_mark", None)
+    if mark is None:
+        return f"invalid YAML in {config_path}. {hint}"
+    return (
+        f"invalid YAML in {config_path} at line {mark.line + 1}, column "
+        f"{mark.column + 1}. The line is not printed because it may hold a "
+        f"secret. {hint}"
+    )
 
 
 def _garmin_entry(name, entry):

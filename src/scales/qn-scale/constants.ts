@@ -34,7 +34,7 @@ import { uuid16 } from '../body-comp-helpers.js';
  *   0x12 (scale info) -> AE01 init (if AE00) -> 0x13 config
  *   0x14 (ready ACK)  -> 0x20 time sync + A2 user profile + "pass" auth
  *                        (no A2 on the 19-byte dialect with ble.qn_weight_ack)
- *   0x21 (config req)  -> A00D history responses + 0x22 start measurement
+ *   0x21 (config req)  -> A00D profile frame + 0x22 start measurement
  *   0x10 (weight)      -> parse weight + 0x1F acknowledge stable reading
  *
  * 0x10 frame (original format, 10 bytes):
@@ -48,6 +48,9 @@ import { uuid16 } from '../body-comp-helpers.js';
  *   [5-6]   weight (BE uint16, / weightScaleFactor)
  *   [7-8]   resistance R1 (BE uint16)
  *   [9-10]  resistance R2 (BE uint16)
+ *
+ * 0x10 frame (19-byte dialect, 20 bytes, weight at [5..6] /100): see
+ *   LIVE20_FRAME_LEN below.
  *
  * 0x12 frame (scale info, classic 11-byte format):
  *   [2]     protocol type (echoed back in all config commands)
@@ -112,6 +115,13 @@ export const CHR_WRITE_T1 = uuid16(0xffe3);
  * arrives before them, so on that unit they are not what opens the stream.
  * With `ble.qn_weight_ack` set on any dialect but the 20-byte extended one
  * they therefore go out after that A2 pair; the extended order is unchanged.
+ *
+ * The values in the #75 frames are of the same size and spread as the
+ * 19-byte dialect's result block (see LIVE20_FRAME_LEN) from that same unit,
+ * so the payload looks like a previous measurement record of the person who
+ * captured it, handed back to the scale. Hypothesis only: one value lines up
+ * exactly, the rest are 3 to 10 percent apart. Replaying it on another
+ * person's scale is one more reason this stays off by default.
  */
 export const A4_PRELUDE: readonly (readonly number[])[] = [
   [0xa4, 0x0f, 0x01, 0x21, 0x0a, 0x48, 0x08, 0xf1, 0x0a, 0x33, 0x08, 0xda, 0x08, 0x80, 0xc7],
@@ -152,57 +162,89 @@ export const CHR_SIG_WEIGHT_MEASUREMENT = uuid16(0x2a9d);
 export const SCALE_EPOCH_OFFSET = 946684800;
 
 /**
- * Payload byte of the A00D history-response frame sent in reply to the scale's
- * 0x21 config request: `a0 0d 04 <byte> 00 ...`.
+ * Sub-command of the A00D frame `a0 0d 04 <mask> 00 .. <checksum>`, which the
+ * handshake used to send in reply to every 0x21 config request (#461).
  *
- * 0xFE comes from openScale's QNHandler, which annotates it only as "Payload"
- * and took it from an ES-30M BLE capture. Two vendor-app captures on other
- * firmware in this family send 0xFC in the same position instead:
+ * It is not a history response. In the vendor's published Android SDK (qnsdkX
+ * 2.37.2) this exact frame, sub-command 0x04 with a bit mask at [3], is the
+ * command that DELETES USERS from the scale: bit i-1 set means slot i is
+ * deleted, so 0xFC clears slots 3 to 8 and 0xFE slots 2 to 8. The scale's
+ * answer `a1 .. 04 <mask> 01` is that command's success reply, and the scales
+ * in our logs send exactly that: #461 `a1 06 04 fc 01 a8`, #213, #253 and #75
+ * `a1 06 04 fe 01 aa`. The classic scale in #283 does not answer it at all.
  *
- *   #235  GE CS 10 G, 20-byte extended dialect
- *   #75   Arboleaf QN-Scale FW V39, 19-byte es26m dialect
+ * The bytes came from openScale (0xFE, from an ES-30M capture) and from
+ * vendor-app captures (0xFC on #235 and #75, 0xFE on #331). The vendor apps do
+ * send it, but in the SDK only with the slots an app asks to delete, which
+ * reads as an app removing users its account does not own (hypothesis). Sent
+ * blind with a fixed mask, it could delete other people's slots on a shared
+ * scale, together with any weigh-ins the scale still held for them.
  *
- * Both were taken from sessions where the vendor app completed a weigh-in while
- * this adapter saw the whole handshake acknowledged and then silence, and both
- * reporters reached the same reading of it independently: that the byte selects
- * between a live report stream and the stored-history path.
- *
- * That reading is NOT established, and the default therefore does not move.
- * openScale dispatches live 0x10 weight frames while sending 0xFE, so the byte
- * plainly does not gate the live stream on the firmware it was captured from,
- * and the 0x23 stored-record path this adapter relies on for V10 Renpho and
- * ES-CS20M firmware (#213) hangs off the same exchange. A wrong value here is
- * silent in exactly the way a wrong `qn_protocol_byte` is: every command is
- * acknowledged and no weight ever arrives. So `ble.qn_report_byte` exists to
- * let the reporters test 0xFC on their own hardware, and the default changes
- * only if that produces a reading.
+ * So it is no longer sent by default on any dialect: the SDK never sends it
+ * unless an app asks for a deletion, so the firmware cannot depend on it, and
+ * the classic scale ignores it. The byte it carried used to be read as
+ * selecting between a live stream and stored history; that reading is
+ * withdrawn, the captures that seemed to support it are the vendor apps
+ * deleting slots. `ble.qn_report_byte` still sends the frame with the given
+ * mask, for an install that worked with it and stops working without it.
  */
-export const REPORT_BYTE_DEFAULT = 0xfe;
+export const USER_DELETE_SUBCOMMAND = 0x04;
 
 /**
- * Report byte for the LONG-FRAME dialects, es26m (18- or 19-byte) and extended
- * (20-byte). See #235 and #75.
+ * Scrambled impedance (#461).
  *
- * Unlike the default above, this one is not an inference. Two vendor-app
- * captures, on two scales, on both long dialects, agree:
+ * Some QN scales say in their advertisement that they scramble the resistance
+ * bytes they send. The vendor's published Android SDK (qnsdkX 2.37.2) reads it
+ * like this, and does nothing else to a 4-electrode resistance (no scaling):
  *
- *   extended  a raw HCI capture writes `a0 0d 04 fc ...` five times across
- *             three weigh-ins and never sends 0xFE. The scale acknowledges
- *             each one by echoing the byte back as `a1 07 04 fc 01 10 b9`,
- *             and 59 live 0x10 weight frames follow (#235).
- *   es26m     an Android btsnoop of a successful Arboleaf weigh-in sends the
- *             same frame. The reporter's own log line for that unit reads
- *             `QN: scale info (19B, dialect=es26m)`, so the dialect is not
- *             inferred from the model name (#75).
+ *   - the manufacturer data (after the company id, 0xFFFF or 0x01A8) carries a
+ *     model marker at [11]; the markers below belong to the scales the SDK
+ *     drives with its newer ("VA") protocol, whose model number is the value;
+ *   - on those, bit 2 of [15] set means "resistance scrambled";
+ *   - a scrambled resistance has bits 3 and 5, and bits 0 and 4, swapped in
+ *     each of its two bytes before the bytes form the big-endian value.
  *
- * So on the long dialects 0xFC is simply what the protocol uses.
+ * Two real units bracket it. The #461 Physiq advertises marker 0x61 with [15]
+ * = 0x15 (flag set) and sends 4303, 4301 and 4317, which unscramble to 502,
+ * 500 and 501 ohm. The #75 Renpho Elis 1 advertises 0x60 with [15] = 0x01
+ * (flag clear) and sends 507/505 as they are. Every QN unit we have logs from
+ * then lies between 493 and 513 ohm.
  *
- * The 11-byte classic dialect keeps 0xFE. No capture covers it, and unlike the
- * long variants it reads today, which is exactly the asymmetry that decides it:
- * every scale reported silent after a completed handshake is on a long frame.
- * `ble.qn_report_byte` overrides either value if a unit disagrees.
+ * Not a tenth of an ohm: 4303 / 10 lands in the body range only because the
+ * scrambled high byte of 0x01 is 0x10, and the vendor SDK never divides. Not
+ * decided from the value either: unscrambling a clear resistance between 512
+ * and 767 leaves it inside the body range, off by up to 39 ohm, with nothing to
+ * show for it. So only the advertised flag decides, and without an
+ * advertisement nothing is unscrambled.
+ *
+ * The SDK also defines a flag for its older scale family (bit 0 of [12]), but
+ * its category there depends on the advertised name and services as well, and
+ * no unit of that kind in our logs sets it, so it is not read here.
  */
-export const REPORT_BYTE_LONG_FRAME = 0xfc;
+export const SCRAMBLE_MARKER_OFFSET = 11;
+export const SCRAMBLE_FLAG_OFFSET = 15;
+export const SCRAMBLE_FLAG_BIT = 0x04;
+
+/** Company ids the SDK accepts on a QN advertisement. */
+export const QN_COMPANY_IDS: readonly number[] = [0xffff, 0x01a8];
+
+/** Model marker at [11] -> model number, for the scales that may scramble. */
+export const SCRAMBLE_CAPABLE_MARKERS: ReadonlyMap<number, number> = new Map([
+  [0x60, 128],
+  [0x65, 128],
+  [0x66, 128],
+  [0x68, 128],
+  [0x61, 129],
+  [0x62, 129],
+  [0x51, 134],
+  [0x52, 134],
+  [0x67, 152],
+  [0x69, 152],
+  [0x80, 143],
+]);
+
+/** A resistance at or above this means no contact, as in the vendor SDK. */
+export const NO_CONTACT_RESISTANCE = 60000;
 
 /**
  * Grace period (ms) to wait for an impedance frame after the first stable
@@ -390,3 +432,59 @@ export const RESULT_OPCODE_B4 = 0xb4;
 export const RESULT_OPCODE_B1 = 0xb1;
 export const RESULT_MIN_WEIGHT_KG = 5;
 export const RESULT_MAX_WEIGHT_KG = 300;
+
+/**
+ * The 19-byte dialect's weigh-in stream (Arboleaf, #331, D037).
+ *
+ * After START this dialect streams 20-byte 0x10 frames:
+ *
+ *   [0]     0x10
+ *   [1]     total length, 0x14 (0x15/0x16 carry their own, 0x10)
+ *   [2]     0x01 on every first part seen; unit or slot, not decoded
+ *   [3]     status: 0x00 measuring, 0x01 stable, 0x02 result block
+ *   [4]     part: high nibble the part count, low nibble the index (0x11 = 1/1)
+ *   [5..6]  weight, BE u16 /100 kg, first part only. /100 whatever
+ *           weightScaleFactor says: the long 0x12 sets that to 10
+ *   [7..18] zero while measuring
+ *   [19]    sum of the preceding bytes
+ *
+ * One DEBUG log of a complete weigh-in is the whole evidence (#331,
+ * 2026-10-06). The scale streams status 0x00 frames, sends one stable frame
+ * (`10 14 01 01 11 1e 05 .. 5a`, 76.85 kg), then stays silent for 13.15 s while
+ * it runs its BIA, then sends `23 00 .. 00 23`, a three-part result block
+ * (`[4]` 0x31, 0x32, 0x33) and two 16-byte frames, `15 10 ff ..` and
+ * `16 10 ff ..`. 0x16 is the last frame of the weigh-in, 13.96 s after the
+ * stable one. Every one of those frames closes under the sum checksum.
+ *
+ * Only the weight is decoded. The continuation parts carry payload at [2..3]
+ * as well as [5..18], and the reassembled block reads as two ten-value records
+ * that look like a segmental, two-frequency impedance sweep (hypothesis). None
+ * of its values is a whole-body impedance the BIA formula could take: most sit
+ * far outside the 150-1200 ohm band, and the ones inside it differ between the
+ * two records, so passing one on would be a silent BIA fat from a guess (the
+ * D022 defect). 0x15 and 0x16 look like the scale's own composition results
+ * and are not decoded either. The reading is therefore weight-only.
+ */
+export const LIVE20_FRAME_LEN = 20;
+export const LIVE20_FIRST_PART_BYTE2 = 0x01;
+export const LIVE20_STATUS_MEASURING = 0x00;
+export const LIVE20_STATUS_STABLE = 0x01;
+export const LIVE20_STATUS_RESULT = 0x02;
+export const RESULT16_FRAME_LEN = 16;
+export const RESULT16_OPCODE_COMPOSITION = 0x15;
+export const RESULT16_OPCODE_DONE = 0x16;
+
+/**
+ * How long the link is held after the 19-byte dialect's stable weight for its
+ * 0x16 (#331, D037).
+ *
+ * The one sample has 0x16 13.96 s after the stable frame; 20 s leaves about
+ * 6 s. Ending the session on the stable weight instead cuts the link in the
+ * middle of the BIA while the person is still standing on the scale, and a
+ * proxy watcher can then reconnect to the still-advertising scale and send
+ * START into the running measurement. The adapter reports the composition as
+ * pending until 0x16, so a slower BIA gets the HOLD_EXTENSION_* steps on top,
+ * and a weigh-in that never sends 0x16 (in socks, say) resolves weight-only
+ * after at most 40 s.
+ */
+export const NINETEEN_BYTE_RESULT_HOLD_MS = 20_000;

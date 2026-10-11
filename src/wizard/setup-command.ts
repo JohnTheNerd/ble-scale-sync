@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { parse as parseYaml } from 'yaml';
+import { parseConfigYaml } from '../config/yaml-parse.js';
 import { config as dotenvConfig } from 'dotenv';
 import { detectPlatform } from './platform.js';
 import { createRealPromptProvider } from './prompt-provider.js';
@@ -84,7 +84,9 @@ async function runSetup(argv: string[], deps: SetupCommandDeps): Promise<number>
   if (existsSync(args.configPath)) {
     try {
       const raw = readFileSync(args.configPath, 'utf8');
-      existingConfig = parseYaml(raw) as Partial<AppConfig>;
+      // Warnings ignored here: the welcome step parses the same file and
+      // reports them once.
+      existingConfig = parseConfigYaml(raw, args.configPath, () => {}) as Partial<AppConfig>;
     } catch {
       // The welcome step tells the user and does not offer edit mode for it.
     }

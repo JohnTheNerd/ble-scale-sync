@@ -7,7 +7,7 @@
 ![Node.js](https://img.shields.io/badge/node-%3E%3D22-brightgreen?logo=node.js&logoColor=white)
 ![Docker](https://img.shields.io/badge/docker-ghcr.io-blue?logo=docker&logoColor=white)
 
-A cross-platform CLI tool that reads body composition data from **25+ BLE smart scales** and exports to **Garmin Connect**, **Strava**, **Intervals.icu**, **Runalyze**, **Wger**, **HealthLog**, **MQTT** (Home Assistant), **InfluxDB**, **Webhooks**, **Ntfy**, **Telegram**, and **local files** (CSV/JSONL). No phone app needed. Your data stays on your device.
+A cross-platform CLI tool that reads body composition data from **25+ BLE smart scales** and exports to **Garmin Connect**, **Strava**, **Intervals.icu**, **Runalyze**, **Wger**, **HealthLog**, **Dreeve**, **MQTT** (Home Assistant), **InfluxDB**, **Webhooks**, **Ntfy**, **Telegram**, and **local files** (CSV/JSONL). No phone app needed. Your data stays on your device.
 
 **[Documentation](https://blescalesync.dev)** · **[Getting Started](https://blescalesync.dev/guide/getting-started)** · **[Supported Scales](https://blescalesync.dev/guide/supported-scales)** · **[Exporters](https://blescalesync.dev/exporters)** · **[FAQ](https://blescalesync.dev/faq)**
 
@@ -91,10 +91,10 @@ Requires Node.js v22+ and a BLE adapter. See the **[full install guide](https://
 ## Features
 
 - **[25+ scale brands](https://blescalesync.dev/guide/supported-scales).** Xiaomi (Mi Scale 2 passive broadcast), Renpho (Elis 1, ES-CS20M, QN-Scale), Eufy, Yunmai, Beurer (incl. BF720), Sanitas (incl. SBF70 body composition), Medisana, and more.
-- **[12 export targets](https://blescalesync.dev/exporters).** Garmin Connect, Strava, Intervals.icu, Runalyze, Wger, HealthLog, MQTT (Home Assistant), InfluxDB, Webhook, Ntfy, Telegram, File (CSV/JSONL).
+- **[13 export targets](https://blescalesync.dev/exporters).** Garmin Connect, Strava, Intervals.icu, Runalyze, Wger, HealthLog, Dreeve, MQTT (Home Assistant), InfluxDB, Webhook, Ntfy, Telegram, File (CSV/JSONL).
 - **[10 body metrics](https://blescalesync.dev/body-composition).** BIA-based body composition from weight + impedance.
 - **[Multi-user](https://blescalesync.dev/multi-user).** Automatic weight-based identification with per-user exporters.
-- **Historical sync.** Replays a scale's onboard cache of offline measurements with their original timestamps to exporters that support back-dating (Garmin Connect, Intervals.icu, Runalyze, Wger, HealthLog, InfluxDB, File).
+- **Historical sync.** Replays a scale's onboard cache of offline measurements with their original timestamps to exporters that support back-dating (Garmin Connect, Intervals.icu, Runalyze, Wger, HealthLog, Dreeve, InfluxDB, File).
 - **[Interactive setup wizard](https://blescalesync.dev/guide/configuration).** Scale discovery (MAC or macOS CoreBluetooth UUID), exporter config, connectivity tests.
 - **[BLE diagnostic tool](https://blescalesync.dev/troubleshooting).** `ble-scale-sync diagnose` (or `npm run diagnose` from a clone) for detailed BLE troubleshooting.
 - **[Home Assistant Add-on](https://blescalesync.dev/guide/home-assistant-addon).** One-click install via My Home Assistant badge, MQTT auto-discovery, UI-driven config, Garmin token bootstrap, and MFA workaround.
@@ -132,32 +132,42 @@ BlueZ and noble, plus the ESP32 and ESPHome proxies).
 
 ## Credits
 
-- **Scale protocols** - many adapters ported from [openScale](https://github.com/oliexdev/openScale) (oliexdev and contributors); Eufy P2 / P2 Pro ported from [bdr99/eufylife-ble-client](https://github.com/bdr99/eufylife-ble-client); QN-Scale / FITINDEX and a few others reverse-engineered in this project
+- **Scale protocols** - many adapters ported from [openScale](https://github.com/oliexdev/openScale) (oliexdev and contributors); Eufy P2 / P2 Pro ported from [bdr99/eufylife-ble-client](https://github.com/bdr99/eufylife-ble-client); QN-Scale / FITINDEX and a few others reverse-engineered in this project; OKOK / Chipsea broadcast decoded from public captures and cross-checked against openScale and [ble_monitor](https://github.com/custom-components/ble_monitor)
 - **Garmin upload** - powered by [garminconnect](https://github.com/cyberjunky/python-garminconnect) by cyberjunky
 - **BLE** - [node-ble](https://github.com/chrvadala/node-ble) (Linux), [@abandonware/noble](https://github.com/abandonware/noble) (Windows), [@stoprocent/noble](https://github.com/stoprocent/noble) (macOS)
 - **ESP32 proxy** - [mqtt_as](https://github.com/peterhinch/micropython-mqtt) by peterhinch, [aioble](https://github.com/micropython/micropython-lib/tree/master/micropython/bluetooth/aioble)
 
 ## Contributors
 
+Commit counts are regenerated from the git history at every release: authored and co-authored commits count, merge commits and bots do not.
+
+<!-- contributors:start - generated from git history by src/tools/sync-contributors.ts, do not edit by hand -->
 <table><tr>
-<td align="center"><a href="https://github.com/KristianP26"><img src="https://avatars.githubusercontent.com/u/28766334?v=4" width="60" height="60" alt="KristianP26"><br><sub>KristianP26</sub></a></td>
-<td align="center"><a href="https://github.com/APIUM"><img src="https://avatars.githubusercontent.com/u/9067013?v=4" width="60" height="60" alt="APIUM"><br><sub>APIUM</sub></a></td>
-<td align="center"><a href="https://github.com/marcelorodrigo"><img src="https://avatars.githubusercontent.com/u/443962?v=4" width="60" height="60" alt="marcelorodrigo"><br><sub>marcelorodrigo</sub></a></td>
-<td align="center"><a href="https://github.com/fromport"><img src="https://avatars.githubusercontent.com/u/5751308?v=4" width="60" height="60" alt="fromport"><br><sub>fromport</sub></a></td>
-<td align="center"><a href="https://github.com/boildead"><img src="https://avatars.githubusercontent.com/u/17303016?v=4" width="60" height="60" alt="boildead"><br><sub>boildead</sub></a></td>
-<td align="center"><a href="https://github.com/alexw23"><img src="https://avatars.githubusercontent.com/u/1505496?v=4" width="60" height="60" alt="alexw23"><br><sub>alexw23</sub></a></td>
-<td align="center"><a href="https://github.com/bondesen"><img src="https://avatars.githubusercontent.com/u/4944294?v=4" width="60" height="60" alt="bondesen"><br><sub>bondesen</sub></a></td>
-<td align="center"><a href="https://github.com/junaidk"><img src="https://avatars.githubusercontent.com/u/1422281?v=4" width="60" height="60" alt="junaidk"><br><sub>junaidk</sub></a></td>
+<td align="center"><a href="https://github.com/KristianP26"><img src="https://avatars.githubusercontent.com/u/28766334?v=4" width="60" height="60" alt="KristianP26"><br><sub>KristianP26</sub></a><br><sub>968 commits</sub></td>
+<td align="center"><a href="https://github.com/APIUM"><img src="https://avatars.githubusercontent.com/u/9067013?v=4" width="60" height="60" alt="APIUM"><br><sub>APIUM</sub></a><br><sub>34 commits</sub></td>
+<td align="center"><a href="https://github.com/alasano"><img src="https://avatars.githubusercontent.com/u/14372930?v=4" width="60" height="60" alt="alasano"><br><sub>alasano</sub></a><br><sub>8 commits</sub></td>
+<td align="center"><a href="https://github.com/marcelorodrigo"><img src="https://avatars.githubusercontent.com/u/443962?v=4" width="60" height="60" alt="marcelorodrigo"><br><sub>marcelorodrigo</sub></a><br><sub>7 commits</sub></td>
+<td align="center"><a href="https://github.com/alexw23"><img src="https://avatars.githubusercontent.com/u/1505496?v=4" width="60" height="60" alt="alexw23"><br><sub>alexw23</sub></a><br><sub>3 commits</sub></td>
+<td align="center"><a href="https://github.com/bondesen"><img src="https://avatars.githubusercontent.com/u/4944294?v=4" width="60" height="60" alt="bondesen"><br><sub>bondesen</sub></a><br><sub>3 commits</sub></td>
+<td align="center"><a href="https://github.com/albert-canfield"><img src="https://avatars.githubusercontent.com/u/153834574?v=4" width="60" height="60" alt="albert-canfield"><br><sub>albert-canfield</sub></a><br><sub>3 commits</sub></td>
+<td align="center"><a href="https://github.com/ibrokemypie"><img src="https://avatars.githubusercontent.com/u/7827846?v=4" width="60" height="60" alt="ibrokemypie"><br><sub>ibrokemypie</sub></a><br><sub>3 commits</sub></td>
 </tr><tr>
-<td align="center"><a href="https://github.com/hedoric"><img src="https://avatars.githubusercontent.com/u/135505862?v=4" width="60" height="60" alt="hedoric"><br><sub>hedoric</sub></a></td>
-<td align="center"><a href="https://github.com/alasano"><img src="https://avatars.githubusercontent.com/u/14372930?v=4" width="60" height="60" alt="alasano"><br><sub>alasano</sub></a></td>
-<td align="center"><a href="https://github.com/O-Palda"><img src="https://avatars.githubusercontent.com/u/68783617?v=4" width="60" height="60" alt="O-Palda"><br><sub>O-Palda</sub></a></td>
-<td align="center"><a href="https://github.com/Bretos"><img src="https://avatars.githubusercontent.com/u/4947212?v=4" width="60" height="60" alt="Bretos"><br><sub>Bretos</sub></a></td>
-<td align="center"><a href="https://github.com/albert-canfield"><img src="https://avatars.githubusercontent.com/u/153834574?v=4" width="60" height="60" alt="albert-canfield"><br><sub>albert-canfield</sub></a></td>
-<td align="center"><a href="https://github.com/JamieSBenson"><img src="https://avatars.githubusercontent.com/u/21150960?v=4" width="60" height="60" alt="JamieSBenson"><br><sub>JamieSBenson</sub></a></td>
-<td align="center"><a href="https://github.com/gvarph"><img src="https://avatars.githubusercontent.com/u/17300137?v=4" width="60" height="60" alt="gvarph"><br><sub>gvarph</sub></a></td>
-<td align="center"><a href="https://github.com/chrisauer"><img src="https://avatars.githubusercontent.com/u/884764?v=4" width="60" height="60" alt="chrisauer"><br><sub>chrisauer</sub></a></td>
+<td align="center"><a href="https://github.com/fromport"><img src="https://avatars.githubusercontent.com/u/5751308?v=4" width="60" height="60" alt="fromport"><br><sub>fromport</sub></a><br><sub>2 commits</sub></td>
+<td align="center"><a href="https://github.com/O-Palda"><img src="https://avatars.githubusercontent.com/u/68783617?v=4" width="60" height="60" alt="O-Palda"><br><sub>O-Palda</sub></a><br><sub>2 commits</sub></td>
+<td align="center"><a href="https://github.com/chrisauer"><img src="https://avatars.githubusercontent.com/u/884764?v=4" width="60" height="60" alt="chrisauer"><br><sub>chrisauer</sub></a><br><sub>2 commits</sub></td>
+<td align="center"><a href="https://github.com/gvarph"><img src="https://avatars.githubusercontent.com/u/17300137?v=4" width="60" height="60" alt="gvarph"><br><sub>gvarph</sub></a><br><sub>2 commits</sub></td>
+<td align="center"><a href="https://github.com/vargamihaly"><img src="https://avatars.githubusercontent.com/u/20193710?v=4" width="60" height="60" alt="vargamihaly"><br><sub>vargamihaly</sub></a><br><sub>2 commits</sub></td>
+<td align="center"><a href="https://github.com/boildead"><img src="https://avatars.githubusercontent.com/u/17303016?v=4" width="60" height="60" alt="boildead"><br><sub>boildead</sub></a><br><sub>1 commit</sub></td>
+<td align="center"><a href="https://github.com/junaidk"><img src="https://avatars.githubusercontent.com/u/1422281?v=4" width="60" height="60" alt="junaidk"><br><sub>junaidk</sub></a><br><sub>1 commit</sub></td>
+<td align="center"><a href="https://github.com/hedoric"><img src="https://avatars.githubusercontent.com/u/135505862?v=4" width="60" height="60" alt="hedoric"><br><sub>hedoric</sub></a><br><sub>1 commit</sub></td>
+</tr><tr>
+<td align="center"><a href="https://github.com/Bretos"><img src="https://avatars.githubusercontent.com/u/4947212?v=4" width="60" height="60" alt="Bretos"><br><sub>Bretos</sub></a><br><sub>1 commit</sub></td>
+<td align="center"><a href="https://github.com/JamieSBenson"><img src="https://avatars.githubusercontent.com/u/21150960?v=4" width="60" height="60" alt="JamieSBenson"><br><sub>JamieSBenson</sub></a><br><sub>1 commit</sub></td>
+<td align="center"><a href="https://github.com/totalitarian"><img src="https://avatars.githubusercontent.com/u/2385696?v=4" width="60" height="60" alt="totalitarian"><br><sub>totalitarian</sub></a><br><sub>1 commit</sub></td>
+<td align="center"><a href="https://github.com/ocurero"><img src="https://avatars.githubusercontent.com/u/2606647?v=4" width="60" height="60" alt="ocurero"><br><sub>ocurero</sub></a><br><sub>1 commit</sub></td>
+<td align="center"><a href="https://github.com/rolandgeider"><img src="https://avatars.githubusercontent.com/u/2280729?v=4" width="60" height="60" alt="rolandgeider"><br><sub>rolandgeider</sub></a><br><sub>1 commit</sub></td>
 </tr></table>
+<!-- contributors:end -->
 
 ## Contributing
 

@@ -1,8 +1,8 @@
 /**
  * Device matching for the QN family.
  *
- * Both functions here are pure over the BleDeviceInfo / ConnectionContext they
- * are given: neither reads a single field of the adapter instance, which is why
+ * Every function here is pure over the BleDeviceInfo / ConnectionContext data
+ * it is given: none reads a single field of the adapter instance, which is why
  * they can live outside the class at all. Keep it that way.
  */
 
@@ -17,6 +17,11 @@ import {
   CHR_SIG_WEIGHT_MEASUREMENT,
   CHR_WRITE,
   CHR_WRITE_T1,
+  QN_COMPANY_IDS,
+  SCRAMBLE_CAPABLE_MARKERS,
+  SCRAMBLE_FLAG_BIT,
+  SCRAMBLE_FLAG_OFFSET,
+  SCRAMBLE_MARKER_OFFSET,
   SVC_AE00,
   SVC_SIG_BCS,
   SVC_SIG_WSS,
@@ -180,4 +185,45 @@ export function warnOnOneByoneShape(ctx: ConnectionContext): void {
       'report this log on issue #320: a real device of this shape is exactly ' +
       'the evidence needed to narrow the fallback safely.',
   );
+}
+
+/** What a QN advertisement says about how the scale sends its resistance. */
+export interface QnAdvertTraits {
+  /** Model number from the marker at [11], or null when it is not one we know. */
+  category: number | null;
+  /** Bit 2 of [15] on a known marker: the resistance arrives scrambled. */
+  scrambled: boolean;
+}
+
+/**
+ * Read the impedance flag from the advertisement the session matched on
+ * (ConnectionContext.manufacturerData), see SCRAMBLE_FLAG_BIT (#461).
+ *
+ * Null when there is nothing to read: no manufacturer data, a company id the
+ * vendor SDK does not use, a payload too short to carry the MAC, or a MAC at
+ * [5..10] (little-endian) that is not the connected device's. The MAC check is
+ * ours, not the SDK's, and is skipped when the transport has no address (noble
+ * on macOS). An advertisement shorter than 12 bytes, like the classic scale's
+ * 11, carries no marker and is read as not scrambled.
+ */
+export function qnAdvertTraits(
+  mfg: { id: number; data: Buffer } | undefined,
+  deviceAddress: string,
+): QnAdvertTraits | null {
+  if (!mfg || !QN_COMPANY_IDS.includes(mfg.id)) return null;
+  const { data } = mfg;
+  if (data.length < 11) return null;
+  if (/^[0-9A-F]{12}$/i.test(deviceAddress)) {
+    const echoed = Buffer.from(data.subarray(5, 11)).reverse().toString('hex');
+    if (echoed.toUpperCase() !== deviceAddress.toUpperCase()) return null;
+  }
+  const category =
+    data.length > SCRAMBLE_MARKER_OFFSET
+      ? (SCRAMBLE_CAPABLE_MARKERS.get(data[SCRAMBLE_MARKER_OFFSET]) ?? null)
+      : null;
+  const scrambled =
+    category !== null &&
+    data.length > SCRAMBLE_FLAG_OFFSET &&
+    (data[SCRAMBLE_FLAG_OFFSET] & SCRAMBLE_FLAG_BIT) !== 0;
+  return { category, scrambled };
 }

@@ -8,7 +8,7 @@ head:
 hero:
   name: BLE Scale Sync
   text: Automatic body composition sync
-  tagline: Cross-platform CLI for Linux, macOS & Windows. Read weight & impedance from 25+ BLE smart scales and export to Garmin Connect, Strava, Home Assistant, Wger, HealthLog, InfluxDB, Webhooks, Ntfy & local files. No phone app needed.
+  tagline: Cross-platform CLI for Linux, macOS & Windows. Read weight & impedance from 25+ BLE smart scales and export to Garmin Connect, Strava, Home Assistant, Wger, HealthLog, Dreeve, InfluxDB, Webhooks, Ntfy & local files. No phone app needed.
   image:
     src: /logo.svg
     alt: BLE Scale Sync
@@ -27,8 +27,8 @@ features:
     link: /guide/supported-scales
     linkText: See all scales
   - icon: "\uD83D\uDCE4"
-    title: 12 Export Targets
-    details: Garmin Connect &bull; Strava &bull; Intervals.icu &bull; Runalyze &bull; Wger &bull; HealthLog &bull; MQTT (Home Assistant) &bull; InfluxDB &bull; Webhook &bull; Ntfy &bull; Telegram &bull; File (CSV/JSONL)
+    title: 13 Export Targets
+    details: Garmin Connect &bull; Strava &bull; Intervals.icu &bull; Runalyze &bull; Wger &bull; HealthLog &bull; Dreeve &bull; MQTT (Home Assistant) &bull; InfluxDB &bull; Webhook &bull; Ntfy &bull; Telegram &bull; File (CSV/JSONL)
     link: /exporters
     linkText: Configure exporters
   - icon: "\uD83E\uDDE0"
@@ -96,7 +96,7 @@ Running Home Assistant **OS** or **Supervised**? One click and skip the CLI enti
 
 The badge opens your Home Assistant instance, confirms the repository, and lands you on the Add-on Store with **BLE Scale Sync** ready to install.
 
-The add-on handles config through the UI, auto-detects the Mosquitto broker for Home Assistant auto-discovery, and bootstraps Garmin tokens on first start. See the [Home Assistant Add-on guide](/guide/home-assistant-addon) for the full option reference, MFA workaround, and custom config mode.
+The add-on handles config through the UI, including the Bluetooth transport (the host adapter, Home Assistant Bluetooth, or an ESPHome or ESP32 proxy), auto-detects the Mosquitto broker for Home Assistant auto-discovery, and bootstraps Garmin tokens on first start. See the [Home Assistant Add-on guide](/guide/home-assistant-addon) for the full option reference, MFA workaround, and custom config mode.
 
 ::: warning
 Add-ons are not available on **HA Container** or **HA Core** installs (no Supervisor). Use Option 1 instead.

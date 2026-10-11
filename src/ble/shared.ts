@@ -224,6 +224,7 @@ function initializeAdapter(
   lanes: WriteLanes,
   scaleAuth?: ScaleAuth,
   deviceName?: string,
+  manufacturerData?: { id: number; data: Buffer },
 ): {
   start: () => Promise<void>;
   cleanup: () => void;
@@ -305,6 +306,7 @@ function initializeAdapter(
         scaleAuth,
         deviceAddress,
         ...(deviceName ? { deviceName } : {}),
+        ...(manufacturerData ? { manufacturerData } : {}),
         availableChars,
         write: async (charUuid, data, withResponse = true) => {
           const char = resolveChar(charMap, charUuid);
@@ -571,6 +573,7 @@ export function waitForRawReading(
   scaleAuth?: ScaleAuth,
   onActivity?: (minIdleMs?: number) => void,
   deviceName?: string,
+  manufacturerData?: { id: number; data: Buffer },
 ): Promise<RawReading> {
   return new Promise<RawReading>((resolve, reject) => {
     let resolved = false;
@@ -732,6 +735,7 @@ export function waitForRawReading(
       lanes,
       scaleAuth,
       deviceName,
+      manufacturerData,
     );
 
     bleDevice.onDisconnect(() => {

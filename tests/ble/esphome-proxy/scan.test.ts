@@ -18,6 +18,8 @@ const fireDisconnectSpy = vi.fn();
 // When set, connectGatt hands back a session that never notifies and whose
 // device never reports a disconnect - an ESP32 that dropped off Wi-Fi mid-read.
 let hangSession = false;
+// When set, start() delivers these events instead of the default named pair.
+let startAdverts: Array<[BleDeviceInfo, string]> | null = null;
 
 vi.mock('../../../src/ble/handler-esphome-proxy/pool.js', () => {
   class FakeEsphomeProxyPool {
@@ -28,6 +30,10 @@ vi.mock('../../../src/ble/handler-esphome-proxy/pool.js', () => {
       // exercises the GATT in-flight guard and scanDevices dedup.
       setImmediate(() => {
         for (const cb of this.subs) {
+          if (startAdverts) {
+            for (const [info, mac] of startAdverts) cb(info, mac);
+            continue;
+          }
           cb({ localName: 'GATT-scale', serviceUuids: [] }, 'AA:BB:CC:DD:EE:01');
           cb({ localName: 'GATT-scale', serviceUuids: [] }, 'AA:BB:CC:DD:EE:01');
         }
@@ -158,6 +164,56 @@ describe('scanAndReadRaw GATT single-shot (#116)', () => {
     } finally {
       hangSession = false;
       vi.useRealTimers();
+    }
+  });
+});
+
+// #461: the proxy delivers the advertisement and its scan response as two
+// events, and the one that matches (named) need not carry the manufacturer
+// data. The bytes are the #461 Physiq advertisement (node-ble log); the split
+// into a nameless event with them and a named one without is synthetic.
+describe('scanAndReadRaw manufacturer data handoff (#461)', () => {
+  const MFG_461 = {
+    id: 0xffff,
+    data: Buffer.from('081401000025e0160005ff6108010015', 'hex'),
+  };
+  const MAC = 'FF:05:00:16:E0:25';
+
+  it('hands the last seen manufacturer data to the session, not to the matcher', async () => {
+    const matched: BleDeviceInfo[] = [];
+    const ctxMfg: Array<{ id: number; data: Buffer } | undefined> = [];
+    const adapter = {
+      ...gattAdapter(),
+      matches: (info: BleDeviceInfo) => {
+        if (info.localName !== 'GATT-scale') return false;
+        matched.push(info);
+        return true;
+      },
+      onConnected: async (ctx: Parameters<NonNullable<ScaleAdapter['onConnected']>>[0]) => {
+        ctxMfg.push(ctx.manufacturerData);
+      },
+    } as ScaleAdapter;
+    startAdverts = [
+      [{ localName: '', serviceUuids: [], manufacturerData: MFG_461 }, MAC],
+      [{ localName: 'GATT-scale', serviceUuids: [normalizeUuid('ffe0')] }, MAC],
+    ];
+    try {
+      const result = await scanAndReadRaw({
+        adapters: [adapter],
+        profile,
+        esphomeProxy: {
+          host: 'p1',
+          port: 6053,
+          client_info: 'x',
+          additional_proxies: [],
+        } as never,
+      });
+      expect(result.reading.weight).toBe(75);
+      expect(ctxMfg).toEqual([MFG_461]);
+      expect(matched.length).toBeGreaterThan(0);
+      expect(matched.every((info) => info.manufacturerData === undefined)).toBe(true);
+    } finally {
+      startAdverts = null;
     }
   });
 });

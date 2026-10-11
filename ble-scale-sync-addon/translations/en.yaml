@@ -3,12 +3,22 @@ configuration:
     name: Scale MAC address
     description: >-
       MAC address of your BLE scale (e.g., FF:03:00:13:A1:04).
-      Run the BLE scan from the add-on logs to find it.
+      Run the BLE scan from the add-on logs to find it, or with ble_transport
+      ha-bluetooth, Home Assistant's Bluetooth advertisement monitor.
       Leave empty for auto-discovery.
+  ble_transport:
+    name: Bluetooth transport
+    description: >-
+      How the add-on reaches the scale. local: this host's Bluetooth adapter,
+      as before. ha-bluetooth: every Bluetooth adapter and proxy Home
+      Assistant already uses, no token needed, but only for scales that send
+      the weight in their advertisement. esphome-proxy: an ESPHome Bluetooth
+      proxy that Home Assistant has not adopted. mqtt-proxy: the ESP32 proxy
+      firmware over MQTT. Options below that name a transport only apply to it.
   ble_adapter:
     name: Bluetooth adapter
     description: >-
-      Linux HCI adapter name (e.g., hci0, hci1).
+      local transport only. Linux HCI adapter name (e.g., hci0, hci1).
       Only needed if you have multiple Bluetooth adapters.
       Leave empty for the system default.
   force_scale_adapter:
@@ -27,28 +37,30 @@ configuration:
       in the log and then never reports a weight. Then try 0, or 255, or the
       value the "QN: scale info" log line shows as proto. Accepts 0 to 255.
   qn_report_byte:
-    name: QN history response byte
+    name: QN user-delete mask (deletes data)
     description: >-
-      QN-family scales only, and only worth trying after the QN protocol byte
-      did not help. Try 252, which is what vendor-app captures of a GE CS 10 G
-      and an Arboleaf QN-Scale send where this add-on sends the default 254.
-      Accepts 0 to 255.
+      QN-family scales only. Leave empty. When set, every connection sends the
+      command that deletes the user slots this value selects on the scale
+      (252 deletes slots 3 to 8), which can remove other people's users and
+      stored weigh-ins. Set it only if your scale stopped reporting when this
+      command was dropped. Accepts 0 to 255.
   qn_weight_ack:
     name: QN weight acknowledgement
     description: >-
-      QN-family scales only, and the last thing to try after the two QN bytes
-      above. Sends your weight anchor (last known weight, or the middle of
+      QN-family scales only, and the last thing to try after the QN protocol
+      byte above. Sends your weight anchor (last known weight, or the middle of
       your weight range) twice right after the start command, as the
       Arboleaf vendor app does, and acknowledges live weight frames with their
       own weight. On the 19-byte Arboleaf dialect it also sends your age and
-      height as the app does. Leave empty unless your QN scale completes the
-      whole handshake in the log and then reports no weight at all; then set
-      true.
+      height as the app does, and one such scale streamed its weight with this
+      and QN long time sync both set true (reading it is not yet confirmed on
+      hardware, #331). Leave empty unless your QN scale completes the whole
+      handshake in the log and then reports no weight at all; then set true.
   qn_a4_prelude:
     name: QN A4 prelude
     description: >-
-      QN-family scales only, and the last thing to try after the two QN bytes
-      and the weight acknowledgement. An HCI capture of an Arboleaf vendor app
+      QN-family scales only, and the last thing to try after the QN protocol
+      byte and the weight acknowledgement. An HCI capture of an Arboleaf vendor app
       shows two undecoded 0xA4 frames sent between the start command and the
       first weight frame, which this add-on does not send. Set true to replay
       them. The payload is one reporter's own bytes, so it may help your unit
@@ -73,7 +85,8 @@ configuration:
   auto_clear_stale_bond:
     name: Re-pair a scale that forgot its pairing
     description: >-
-      Bonded scales only (Beurer BF7xx and BF9xx). Turn this on if the scale
+      local transport only, and bonded scales only (Beurer BF7xx and BF9xx).
+      Turn this on if the scale
       works once and then every later connect fails, until you clear it by hand
       with bluetoothctl. The scale has dropped its half of the pairing while
       Home Assistant still holds the key; this lets the add-on delete that key
@@ -81,7 +94,7 @@ configuration:
   preemptive_adapter_reset:
     name: Power-cycle the adapter after every weigh-in
     description: >-
-      Built-in Bluetooth only. After every connection to the scale the add-on
+      local transport only. After every connection to the scale the add-on
       switches the Bluetooth adapter off and on again, which clears a stuck
       scanning state some Raspberry Pi adapters fall into. Leave it on. It was
       not the cause of the Beurer BF915 re-pairing in #417; for a scale that
@@ -93,7 +106,7 @@ configuration:
   adapter_privacy:
     name: Pair with a host identity key (LE privacy)
     description: >-
-      Built-in Bluetooth only. For Beurer scales that ask you to press SET and
+      local transport only. For Beurer scales that ask you to press SET and
       pair again before every weigh-in. Turns on LE privacy on the Bluetooth
       adapter, with a key derived from its address, so the scale keeps the
       pairing. This affects the whole adapter: every Bluetooth LE connection
@@ -102,12 +115,58 @@ configuration:
       need pairing again. A second adapter set under ble_adapter avoids that.
       After turning it on, remove the scale once (bluetoothctl remove) and pair
       it through the add-on. Leave it off otherwise.
+  esphome_proxy_host:
+    name: ESPHome proxy host
+    description: >-
+      esphome-proxy only. IP address or host name of the proxy, e.g.
+      192.168.1.50. Use a node Home Assistant has not adopted; for one it
+      already uses, pick ha-bluetooth.
+  esphome_proxy_port:
+    name: ESPHome proxy port
+    description: >-
+      esphome-proxy only. Native API port, 6053 unless the device sets another.
+  esphome_proxy_encryption_key:
+    name: ESPHome API encryption key
+    description: >-
+      esphome-proxy only. The key under api: encryption: in the device's YAML
+      (44 characters, ends in =). Leave empty only if the device has no API
+      encryption. A device that still uses an API password needs custom_config.
+  mqtt_proxy_broker:
+    name: ESP32 proxy broker
+    description: >-
+      mqtt-proxy only. shared: the broker from the MQTT options below
+      (Mosquitto when auto-detect is on); give the ESP32 its own login there.
+      embedded: a broker inside this add-on, with the port, username and
+      password below. Set mqtt_broker in the ESP32's config.json to that
+      broker's address: this host's IP address for Mosquitto or embedded.
+  mqtt_proxy_device_id:
+    name: ESP32 proxy device ID
+    description: mqtt-proxy only. Same as device_id in the ESP32's config.json.
+  mqtt_proxy_topic_prefix:
+    name: ESP32 proxy topic prefix
+    description: mqtt-proxy only. Same as topic_prefix in the ESP32's config.json.
+  mqtt_proxy_embedded_broker_port:
+    name: Embedded broker port
+    description: >-
+      mqtt-proxy with the embedded broker only. Port on this host. Mosquitto
+      usually has 1883 already; then pick another and set the same mqtt_port
+      in the ESP32's config.json.
+  mqtt_proxy_username:
+    name: Embedded broker username
+    description: >-
+      mqtt-proxy with the embedded broker only, and required there: the broker
+      is reachable from your network and the ESP32 logs in with these.
+  mqtt_proxy_password:
+    name: Embedded broker password
+    description: >-
+      mqtt-proxy with the embedded broker only, and required there: the broker
+      is reachable from your network and the ESP32 logs in with these.
   proxy_liveness_timeout_min:
     name: Proxy silence before restart (minutes)
     description: >-
-      Proxy setups only (ESP32 proxy, ESPHome proxy or Home Assistant
-      Bluetooth), which this add-on runs only with custom_config enabled; it
-      has no effect on the built-in Bluetooth adapter. If the proxy stops
+      Proxy transports only (any ble_transport but local, or a proxy handler
+      in a custom config); it has no effect on the built-in Bluetooth adapter.
+      If the proxy stops
       delivering Bluetooth advertisements entirely for this many minutes, the
       link is treated as wedged and the add-on restarts to rebuild it.
       Advertisements arrive constantly from any nearby phone or watch while the
@@ -177,7 +236,8 @@ configuration:
     name: MQTT broker URL
     description: >-
       MQTT broker URL (e.g., mqtt://192.168.1.10:1883).
-      Only used when auto-detect is disabled.
+      Only used when auto-detect is disabled. With ble_transport mqtt-proxy and
+      mqtt_proxy_broker shared, the ESP32 proxy uses this broker too.
   mqtt_username:
     name: MQTT username
     description: MQTT broker username (only when auto-detect is disabled)
@@ -224,8 +284,9 @@ configuration:
     description: >-
       Keep a reading whose upload failed and try again on a later cycle, for up
       to three days. Only targets that can record a past measurement (Garmin,
-      InfluxDB, file, Intervals, Runalyze, wger, HealthLog) can be retried;
-      MQTT and notifications cannot express a past reading and are not queued.
+      InfluxDB, file, Intervals, Runalyze, wger, HealthLog, Dreeve) can be
+      retried; MQTT and notifications cannot express a past reading and are
+      not queued.
       Turn off to write nothing to disk.
   idle_rescan_delay:
     name: Rescan delay when no scale was found (seconds)
@@ -239,7 +300,8 @@ configuration:
       Power-cycle the Bluetooth adapter when the add-on starts.
       Helps with BlueZ stability after ungraceful shutdowns.
       Disable this if other HA Bluetooth integrations lose
-      connectivity when the add-on restarts.
+      connectivity when the add-on restarts. Skipped when ble_transport is
+      not local.
   debug:
     name: Debug logging
     description: Enable verbose BLE debug output in the add-on logs
@@ -255,4 +317,5 @@ configuration:
     description: >-
       Use a custom config.yaml file from /share/ble-scale-sync/config.yaml
       instead of generating one from the options above.
-      For advanced users who need multi-user support or additional exporters.
+      For advanced users who need multi-user support, additional exporters or
+      transport settings these options do not cover.

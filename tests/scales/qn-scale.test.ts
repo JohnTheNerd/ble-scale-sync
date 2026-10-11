@@ -7,6 +7,13 @@ import {
   buildConfig,
   buildUserProfileFrame,
 } from '../../src/scales/qn-scale/index.js';
+import {
+  decodeStoredRecord,
+  decryptQnResistance,
+  hasValidSumChecksum,
+} from '../../src/scales/qn-scale/frames.js';
+import { qnAdvertTraits } from '../../src/scales/qn-scale/matching.js';
+import { NINETEEN_BYTE_RESULT_HOLD_MS } from '../../src/scales/qn-scale/constants.js';
 import { bleLog } from '../../src/ble/types.js';
 import { uuid16 } from '../../src/scales/body-comp-helpers.js';
 import type {
@@ -444,23 +451,25 @@ describe('QnScaleAdapter', () => {
 
     // #213 / #75: V10 Renpho / ES-CS20M firmware delivers the weigh-in via the
     // stored-data query path (0x22 -> 0x23), not reliably via live 0x10 frames.
-    // openScale QNHandler parses 0x23: weight=u16be[10,11]/100, r1=u16le[13,14],
-    // r2=u16le[15,16], timestamp=u32le[6,9] (2000-epoch seconds).
+    // Layout: time u32le[6..9] (2000-epoch seconds), weight u16be[10..11]/100,
+    // R50 u16be[12..13], R500 u16be[14..15] (#461, see decodeStoredRecord).
     it('parses a fresh 0x23 stored measurement as a reading', () => {
-      const adapter = makeAdapter();
-      const nowScaleSeconds = Math.floor(Date.now() / 1000) - 946684800;
-      const buf = Buffer.alloc(19);
-      buf[0] = 0x23;
-      buf[1] = 0x13;
-      buf[2] = 0xff;
-      buf.writeUInt32LE(nowScaleSeconds >>> 0, 6);
-      buf.writeUInt16BE(8495, 10); // 84.95 kg
-      buf.writeUInt16LE(504, 13); // r1
-      buf.writeUInt16LE(246, 15); // r2
-      const reading = adapter.parseNotification(buf);
-      expect(reading).not.toBeNull();
-      expect(reading!.weight).toBeCloseTo(84.95);
-      expect(reading!.impedance).toBe(504);
+      vi.useFakeTimers();
+      try {
+        // The real record from #213, at the time it was logged.
+        vi.setSystemTime(new Date('2026-06-05T09:17:26.294Z'));
+        const adapter = makeAdapter();
+        const buf = Buffer.from([
+          0x23, 0x13, 0xff, 0x01, 0x01, 0xf0, 0xa1, 0x50, 0xb5, 0x31, 0x21, 0x2f, 0x01, 0xf8, 0x01,
+          0xf6, 0x00, 0x00, 0x3e,
+        ]);
+        const reading = adapter.parseNotification(buf);
+        expect(reading).not.toBeNull();
+        expect(reading!.weight).toBeCloseTo(84.95);
+        expect(reading!.impedance).toBe(504);
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it('rejects a stale 0x23 stored record (older than 90s before now)', () => {
@@ -1625,50 +1634,88 @@ describe('AE02 dispatch (#75, #235)', () => {
       expect(config).toEqual([0x13, 0x09, 0xff, 0x01, 0x10, 0x00, 0x00, 0x00, 0x2c]);
     });
 
-    // The A00D history-response pair had no coverage at all before #235/#75
-    // put its payload byte in question, so these pin both the default and the
-    // override.
-    // A vendor-app capture of this dialect writes 0xFC five times across three
-    // weigh-ins, never 0xFE, the scale echoes it back as `a1 07 04 fc 01 10 b9`,
-    // and 59 live 0x10 frames follow (#235).
-    // The 19-byte es26m dialect gets the same byte, from the #75 capture. The
-    // reporter's own log names the dialect, so this is not inferred from a model.
-    it('sends the A00D history response with 0xFC on the es26m dialect', async () => {
-      const adapter = makeAdapter();
-      // 19-byte 0x12: long-frame variant, not the 20-byte extended one.
-      const info = Buffer.alloc(19);
-      info[0] = 0x12;
-      info[1] = 0x13;
-      info[2] = 0xff;
-      info[10] = 0;
-      const writes = await driveHandshake(adapter, info);
-      const msg1 = writes.find((w) => w[0] === 0xa0 && w[2] === 0x04);
-      expect(msg1).toBeDefined();
-      expect(msg1![3]).toBe(0xfc);
-      expect(msg1![12]).toBe(msg1!.slice(0, 12).reduce((a, b) => a + b, 0) & 0xff);
-    });
+    // `a0 0d 04 <mask> ..`, sent on 0x21 since openScale's port and read as a
+    // "history response", is the user-delete command in the vendor's published
+    // SDK, and the scales answer it as a successful delete (#461 `a1 06 04 fc 01
+    // a8`). No dialect gets it by default any more; the A00D profile frame and
+    // START still follow the 0x21.
+    describe('A00D user-delete frame (#461)', () => {
+      /** Real 0x12 frames from the logs, one per dialect. */
+      const DIALECT_INFO: [string, Buffer][] = [
+        // #283, classic (17 bytes, `[1]` 0x11)
+        [
+          'classic',
+          Buffer.from([
+            0x12, 0x11, 0xff, 0xd3, 0x60, 0x18, 0x00, 0x01, 0xfb, 0x0a, 0x03, 0x19, 0x00, 0x04,
+            0x05, 0x07, 0x9f,
+          ]),
+        ],
+        // #461 Physiq, es26m (18 bytes)
+        [
+          'es26m 18-byte',
+          Buffer.from([
+            0x12, 0x12, 0xff, 0x25, 0xe0, 0x16, 0x00, 0x05, 0xff, 0x13, 0x07, 0x16, 0x00, 0x00,
+            0x05, 0x9f, 0x32, 0x48,
+          ]),
+        ],
+        ['extended 20-byte', makeExtendedScaleInfo()],
+      ];
 
-    it('sends the A00D history response with 0xFC on the extended dialect', async () => {
-      const adapter = makeAdapter();
-      const writes = await driveHandshake(adapter, makeExtendedScaleInfo());
-      const msg1 = writes.find((w) => w[0] === 0xa0 && w[2] === 0x04);
-      expect(msg1).toBeDefined();
-      expect(msg1![3]).toBe(0xfc);
-      expect(msg1![12]).toBe(msg1!.slice(0, 12).reduce((a, b) => a + b, 0) & 0xff);
-    });
+      it.each(DIALECT_INFO)('sends none on the %s dialect by default', async (_name, info) => {
+        const adapter = makeAdapter();
+        const writes = await driveHandshake(adapter, info);
+        expect(writes.some((w) => w[0] === 0xa0 && w[2] === 0x04)).toBe(false);
+        // The rest of the 0x21 answer is unchanged.
+        expect(writes.some((w) => w[0] === 0xa0 && w[2] === 0x02)).toBe(true);
+        expect(writes.some((w) => w[0] === 0x22)).toBe(true);
+      });
 
-    // Everything that is not the captured firmware keeps the value it reads on
-    // today. The capture covers one dialect and says nothing about the others.
-    it('leaves the classic dialect on 0xFE', async () => {
-      const adapter = makeAdapter();
-      const info = Buffer.alloc(11);
-      info[0] = 0x12;
-      info[2] = 0xab;
-      info[10] = 1;
-      const writes = await driveHandshake(adapter, info);
-      const msg1 = writes.find((w) => w[0] === 0xa0 && w[2] === 0x04);
-      expect(msg1![3]).toBe(0xfe);
-      expect(msg1![12]).toBe(msg1!.slice(0, 12).reduce((a, b) => a + b, 0) & 0xff);
+      it('sends none on the no-0x12 fallback handshake either', async () => {
+        vi.useFakeTimers();
+        try {
+          const adapter = makeAdapter();
+          const writes: number[][] = [];
+          const ctx = {
+            write: async (_uuid: string, data: Buffer | number[]) => {
+              writes.push([...data]);
+            },
+            read: async () => Buffer.alloc(0),
+            subscribe: async () => {},
+            profile: defaultProfile(),
+            deviceAddress: '',
+            availableChars: new Set<string>(),
+          } as unknown as ConnectionContext;
+          adapter.onSessionStart?.();
+          await adapter.onConnected(ctx);
+          await vi.advanceTimersByTimeAsync(6000);
+          expect(writes.some((w) => w[0] === 0x22)).toBe(true);
+          expect(writes.some((w) => w[0] === 0xa0 && w[2] === 0x04)).toBe(false);
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it('keeps the profile frame 200 ms after the 0x21, where it was', async () => {
+        const adapter = makeAdapter();
+        const timed: TimedWrite[] = [];
+        await driveHandshake(adapter, makeExtendedScaleInfo(), defaultProfile(), { timed });
+        const start = timed[0].at;
+        const profile = timed.find((w) => w.data[0] === 0xa0 && w.data[2] === 0x02);
+        expect(profile!.at - start).toBe(200);
+      });
+
+      it('warns when ble.qn_report_byte opts back in', () => {
+        const warn = vi.spyOn(bleLog, 'warn').mockImplementation(() => {});
+        try {
+          makeAdapter().configure({ qnReportByte: 0xfc });
+          expect(warn).toHaveBeenCalledWith(expect.stringContaining('deletes the user slots'));
+          warn.mockClear();
+          makeAdapter().configure({});
+          expect(warn).not.toHaveBeenCalled();
+        } finally {
+          warn.mockRestore();
+        }
+      });
     });
 
     it('applies ble.qn_report_byte to the A00D payload byte and recomputes the checksum', async () => {
@@ -2296,7 +2343,7 @@ describe('AE02 dispatch (#75, #235)', () => {
     });
 
     // The same binding for every other step that sleeps between writes: the
-    // A00D pair and START here, the 0x13 config after the AE01 init, and the
+    // A00D profile frame and START here, the 0x13 config after the AE01 init, and the
     // whole fallback handshake below. Default config, no opt-ins.
     it('does not hand a reconnected session the previous session A00D or START', async () => {
       const adapter = makeAdapter();
@@ -2320,10 +2367,12 @@ describe('AE02 dispatch (#75, #235)', () => {
         adapter.parseNotification(ARBOLEAF_2A_INFO);
         adapter.parseNotification(ARBOLEAF_2A_READY);
         adapter.parseNotification(ARBOLEAF_2A_CONFIG_REQ);
-        // The first A00D is out; the second, the 0x13 config and START are
-        // still sleeping when the session ends.
+        // The time sync is out; the A00D profile frame and START are still
+        // sleeping when the session ends (no user-delete frame by default,
+        // #461, so the 200 ms before the profile frame is what is pending).
         await vi.advanceTimersByTimeAsync(100);
-        expect(first.some((w) => w[0] === 0xa0 && w[2] === 0x04)).toBe(true);
+        expect(first.some((w) => w[0] === 0x20)).toBe(true);
+        expect(first.some((w) => w[0] === 0xa0)).toBe(false);
         adapter.onSessionEnd!();
         adapter.onSessionStart?.();
         await adapter.onConnected(makeCtx(second));
@@ -2674,6 +2723,448 @@ describe('AE02 dispatch (#75, #235)', () => {
       expect(writes.slice(before)).toEqual([]);
     });
 
+    // #331, D037: the 19-byte dialect streams 20-byte 0x10 frames, sends one
+    // stable frame, runs its BIA for about 13 s, and closes the weigh-in with a
+    // 0x23 marker, a three-part result block, 0x15 and 0x16.
+    describe('19-byte dialect weigh-in stream (#331, D037)', () => {
+      const hex = (h: string): Buffer => Buffer.from(h.replace(/ /g, ''), 'hex');
+      const withSum = (frame: Buffer): Buffer => {
+        const f = Buffer.from(frame);
+        f[f.length - 1] = [...f.subarray(0, f.length - 1)].reduce((a, b) => a + b, 0) & 0xff;
+        return f;
+      };
+      /** A copy of `frame` with `bytes` written at `at` and the checksum recomputed. */
+      const patched = (frame: Buffer, at: number, ...bytes: number[]): Buffer => {
+        const f = Buffer.from(frame);
+        f.set(bytes, at);
+        return withSum(f);
+      };
+
+      // #331 DEBUG log, 2026-10-06. Byte for byte from the log.
+      const INFO = hex('12 13 ff 54 0b 04 00 07 ff 15 0f 27 00 00 05 03 e0 6f 2f');
+      const READY = hex('14 0b ff 01 00 01 00 00 00 00 20');
+      const CONFIG_REQ = hex('21 05 ff 01 26');
+      const MEASURING = hex('10 14 01 00 11 1e 05 00 00 00 00 00 00 00 00 00 00 00 00 59');
+      const STABLE = hex('10 14 01 01 11 1e 05 00 00 00 00 00 00 00 00 00 00 00 00 5a');
+      const END_MARKER = hex('23 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 23');
+      // Derived from the captured frames: payload zeroed, checksum recomputed.
+      // The captured payload is the person's body composition, which nothing
+      // here decodes. Kept as captured: [0] and [1] of every frame, [2] on
+      // 0x15/0x16, part 1's [2], status [3] and weight [5..6], and the part byte
+      // [4] of each part. On parts 2 and 3, [2..3] is payload and was zeroed.
+      const PART1 = withSum(hex('10 14 01 02 31 1e 05' + ' 00'.repeat(13)));
+      const PART2 = withSum(hex('10 14 00 00 32' + ' 00'.repeat(15)));
+      const PART3 = withSum(hex('10 14 00 00 33' + ' 00'.repeat(15)));
+      const COMP_15 = withSum(hex('15 10 ff' + ' 00'.repeat(13)));
+      const DONE_16 = withSum(hex('16 10 ff' + ' 00'.repeat(13)));
+
+      const WEIGHT = { weight: 76.85, impedance: 0 };
+
+      /** Hand-driven session under fake timers; the caller owns useFakeTimers. */
+      async function openSession(
+        adapter: QnScaleAdapter,
+        info: Buffer = INFO,
+        frames: { ready?: Buffer; configReq?: Buffer } = { ready: READY, configReq: CONFIG_REQ },
+      ): Promise<number[][]> {
+        const writes: number[][] = [];
+        const ctx = {
+          write: async (_uuid: string, data: Buffer | number[]) => {
+            writes.push([...data]);
+          },
+          read: async () => Buffer.alloc(0),
+          subscribe: async () => {},
+          profile: defaultProfile({ lastKnownWeight: 76 }),
+          deviceAddress: '',
+          availableChars: new Set<string>(),
+        } as unknown as ConnectionContext;
+        adapter.onSessionStart?.();
+        await adapter.onConnected(ctx);
+        adapter.parseNotification(info);
+        if (frames.ready) adapter.parseNotification(frames.ready);
+        if (frames.configReq) adapter.parseNotification(frames.configReq);
+        await vi.advanceTimersByTimeAsync(2000);
+        return writes;
+      }
+
+      it('fixtures close under the family checksum', () => {
+        for (const f of [MEASURING, STABLE, END_MARKER, PART1, PART2, PART3, COMP_15, DONE_16]) {
+          expect(hasValidSumChecksum(f)).toBe(true);
+        }
+      });
+
+      it.each([
+        ['the reporter config (qn_weight_ack on)', { qnWeightAck: true }],
+        ['the default config', {}],
+      ])(
+        'reads the stable weight as a provisional reading and writes nothing, with %s',
+        async (_name, config) => {
+          vi.useFakeTimers();
+          try {
+            const adapter = makeAdapter();
+            adapter.configure(config);
+            const writes = await openSession(adapter);
+            const before = writes.length;
+
+            expect(adapter.parseNotification(MEASURING)).toBeNull();
+            expect(adapter.completionHoldMs).toBeUndefined();
+            const reading = adapter.parseNotification(STABLE);
+            expect(reading).toEqual(WEIGHT);
+            expect(adapter.completionHoldMs).toBe(NINETEEN_BYTE_RESULT_HOLD_MS);
+            expect(adapter.isFinal(reading!)).toBe(false);
+            expect(adapter.isComplete(reading!)).toBe(true);
+
+            await vi.advanceTimersByTimeAsync(0);
+            // No 0x1F stable ack, no A2 echo: the logged weigh-in had neither.
+            expect(writes.slice(before)).toEqual([]);
+          } finally {
+            vi.useRealTimers();
+          }
+        },
+      );
+
+      it('publishes the held weight on 0x16, final, and nothing else of the weigh-in', async () => {
+        vi.useFakeTimers();
+        const warn = vi.spyOn(bleLog, 'warn').mockImplementation(() => {});
+        try {
+          const adapter = makeAdapter();
+          adapter.configure({ qnWeightAck: true });
+          const writes = await openSession(adapter);
+          const before = writes.length;
+          warn.mockClear();
+
+          const sequence: [string, Buffer][] = [
+            ['measuring', MEASURING],
+            ['stable', STABLE],
+            ['marker', END_MARKER],
+            ['part1', PART1],
+            ['part2', PART2],
+            ['part3', PART3],
+            ['0x15', COMP_15],
+            ['0x16', DONE_16],
+          ];
+          const returned: string[] = [];
+          const pending: Record<string, boolean> = {};
+          const readings: Record<string, ReturnType<QnScaleAdapter['parseNotification']>> = {};
+          for (const [name, frame] of sequence) {
+            const r = adapter.parseNotification(frame);
+            if (r) returned.push(name);
+            readings[name] = r;
+            // Optional call: on the code before D037 the method does not exist,
+            // and this test has to fail on the readings, not on a TypeError.
+            pending[name] = adapter.isCompositionPending?.() === true;
+          }
+
+          expect(returned).toEqual(['stable', 'part1', '0x16']);
+          expect(readings['0x16']).toEqual(WEIGHT);
+          expect(adapter.isFinal(readings.stable!)).toBe(false);
+          expect(adapter.isFinal(readings.part1!)).toBe(false);
+          expect(adapter.isFinal(readings['0x16']!)).toBe(true);
+          // Pending over the whole BIA, from the stable weight to 0x16, not only
+          // across the result block: the hold only asks when its window ends.
+          expect(pending).toEqual({
+            measuring: false,
+            stable: true,
+            marker: true,
+            part1: true,
+            part2: true,
+            part3: true,
+            '0x15': true,
+            '0x16': false,
+          });
+          // A continuation part read as a first part would trip the [2] warning.
+          expect(warn).not.toHaveBeenCalled();
+
+          await vi.advanceTimersByTimeAsync(20_000);
+          expect(writes.slice(before)).toEqual([]);
+        } finally {
+          warn.mockRestore();
+          vi.useRealTimers();
+        }
+      });
+
+      // Continuation parts carry payload at [2..3] and [5..6] too, so they must be
+      // skipped on the part byte before the first-part checks run. This one is
+      // shaped like a stable first part in every byte those checks look at.
+      it('skips a continuation part whose payload looks like a stable weight', async () => {
+        vi.useFakeTimers();
+        const warn = vi.spyOn(bleLog, 'warn').mockImplementation(() => {});
+        try {
+          const adapter = makeAdapter();
+          await openSession(adapter);
+          warn.mockClear();
+          adapter.parseNotification(STABLE);
+          adapter.parseNotification(END_MARKER);
+          adapter.parseNotification(PART1);
+
+          // PART2 with [2..3] = 01 01 and [5..6] = 0x2000 (81.92 kg).
+          const lookalike = patched(patched(PART2, 2, 0x01, 0x01), 5, 0x20, 0x00);
+          expect(adapter.parseNotification(lookalike)).toBeNull();
+          expect(adapter.completionHoldMs).toBe(NINETEEN_BYTE_RESULT_HOLD_MS);
+          expect(warn).not.toHaveBeenCalled();
+          // The weight 0x16 publishes is still the stable one.
+          expect(adapter.parseNotification(DONE_16)).toEqual(WEIGHT);
+        } finally {
+          warn.mockRestore();
+          vi.useRealTimers();
+        }
+      });
+
+      // The log: `23 00 .. 00 23` read as an empty stored record, and 3 s later
+      // the re-query `22 06 ff 00 03 2a`, which is START, into a finished
+      // weigh-in.
+      it('does not re-send START after the end-of-measurement marker', async () => {
+        vi.useFakeTimers();
+        try {
+          const adapter = makeAdapter();
+          adapter.configure({ qnWeightAck: true });
+          const writes = await openSession(adapter);
+          expect(writes.filter((w) => w[0] === 0x22)).toHaveLength(1);
+
+          adapter.parseNotification(STABLE);
+          expect(adapter.parseNotification(END_MARKER)).toBeNull();
+          await vi.advanceTimersByTimeAsync(20_000);
+          expect(writes.filter((w) => w[0] === 0x22)).toHaveLength(1);
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it('keeps the stored-record path for a 0x23 that is not the marker', async () => {
+        vi.useFakeTimers();
+        const debug = vi.spyOn(bleLog, 'debug').mockImplementation(() => {});
+        try {
+          const adapter = makeAdapter();
+          const writes = await openSession(adapter);
+          adapter.parseNotification(STABLE);
+          // The marker with one payload byte set: no longer the marker shape.
+          expect(adapter.parseNotification(patched(END_MARKER, 5, 0x01))).toBeNull();
+          const lines = debug.mock.calls.map((c) => String(c[0]));
+          expect(lines.some((l) => l.includes('not the end-of-measurement marker'))).toBe(true);
+          // Weight 0 at [10..11], so the old path asks again.
+          await vi.advanceTimersByTimeAsync(3000);
+          expect(writes.filter((w) => w[0] === 0x22)).toHaveLength(2);
+        } finally {
+          debug.mockRestore();
+          vi.useRealTimers();
+        }
+      });
+
+      // With [1..18] all zero the sum is 0x23, so the payload check alone
+      // cannot tell `23 00 .. 00 24` from the marker; only the checksum does.
+      it('keeps the stored-record path for the marker shape with a bad checksum', async () => {
+        vi.useFakeTimers();
+        const debug = vi.spyOn(bleLog, 'debug').mockImplementation(() => {});
+        try {
+          const adapter = makeAdapter();
+          const writes = await openSession(adapter);
+          adapter.parseNotification(STABLE);
+          const bad = Buffer.from(END_MARKER);
+          bad[19] = 0x24;
+          expect(adapter.parseNotification(bad)).toBeNull();
+          const lines = debug.mock.calls.map((c) => String(c[0]));
+          expect(lines.some((l) => l.includes('not the end-of-measurement marker'))).toBe(true);
+          await vi.advanceTimersByTimeAsync(3000);
+          expect(writes.filter((w) => w[0] === 0x22)).toHaveLength(2);
+        } finally {
+          debug.mockRestore();
+          vi.useRealTimers();
+        }
+      });
+
+      it('drops a stable frame with a bad checksum', async () => {
+        vi.useFakeTimers();
+        try {
+          const adapter = makeAdapter();
+          await openSession(adapter);
+          const bad = Buffer.from(STABLE);
+          bad[19] ^= 0x01;
+          expect(adapter.parseNotification(bad)).toBeNull();
+          expect(adapter.completionHoldMs).toBeUndefined();
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it('drops a stable frame with an unknown status', async () => {
+        vi.useFakeTimers();
+        try {
+          const adapter = makeAdapter();
+          await openSession(adapter);
+          expect(adapter.parseNotification(patched(STABLE, 3, 0x03))).toBeNull();
+          expect(adapter.completionHoldMs).toBeUndefined();
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it('does not read the weight when [2] is not 0x01, and warns once', async () => {
+        vi.useFakeTimers();
+        const warn = vi.spyOn(bleLog, 'warn').mockImplementation(() => {});
+        try {
+          const adapter = makeAdapter();
+          await openSession(adapter);
+          const unit2 = patched(STABLE, 2, 0x02);
+          expect(adapter.parseNotification(unit2)).toBeNull();
+          expect(adapter.parseNotification(unit2)).toBeNull();
+          const hits = warn.mock.calls.filter((c) => String(c[0]).includes('at [2]'));
+          expect(hits).toHaveLength(1);
+          expect(adapter.completionHoldMs).toBeUndefined();
+        } finally {
+          warn.mockRestore();
+          vi.useRealTimers();
+        }
+      });
+
+      // Same bounds as the extended result frames: exclusive, so 5.00 kg is out.
+      it.each([
+        ['2.56 kg', 0x0100, null],
+        ['5.00 kg', 0x01f4, null],
+        ['5.01 kg', 0x01f5, { weight: 5.01, impedance: 0 }],
+      ])('reads a stable %s frame as %j', async (_name, raw, expected) => {
+        vi.useFakeTimers();
+        try {
+          const adapter = makeAdapter();
+          await openSession(adapter);
+          const frame = patched(STABLE, 5, raw >> 8, raw & 0xff);
+          expect(adapter.parseNotification(frame)).toEqual(expected);
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it.each([
+        ['index 0', 0x10],
+        ['index past the count', 0x12],
+        ['a count of 0', 0x01],
+      ])('drops a stable frame whose part byte has %s', async (_name, part) => {
+        vi.useFakeTimers();
+        const debug = vi.spyOn(bleLog, 'debug').mockImplementation(() => {});
+        try {
+          const adapter = makeAdapter();
+          await openSession(adapter);
+          expect(adapter.parseNotification(patched(STABLE, 4, part))).toBeNull();
+          expect(adapter.completionHoldMs).toBeUndefined();
+          // Index past the count would otherwise pass as a continuation part,
+          // also null, so the line is what tells the guard apart.
+          const lines = debug.mock.calls.map((c) => String(c[0]));
+          const byte = part.toString(16).padStart(2, '0');
+          expect(lines).toContain(`QN: 20-byte frame with part byte 0x${byte} dropped (#331)`);
+        } finally {
+          debug.mockRestore();
+          vi.useRealTimers();
+        }
+      });
+
+      it('publishes nothing on a 0x16 that follows no stable weight', async () => {
+        vi.useFakeTimers();
+        try {
+          const adapter = makeAdapter();
+          await openSession(adapter);
+          adapter.parseNotification(MEASURING);
+          expect(adapter.parseNotification(DONE_16)).toBeNull();
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it('starts the next session with nothing held', async () => {
+        vi.useFakeTimers();
+        try {
+          const adapter = makeAdapter();
+          await openSession(adapter);
+          adapter.parseNotification(STABLE);
+          adapter.onSessionEnd();
+          adapter.onSessionStart();
+          expect(adapter.completionHoldMs).toBeUndefined();
+          expect(adapter.isCompositionPending()).toBe(false);
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      // Scope: every other dialect, and the 19-byte one without a stream, stays
+      // as it was. These pass on the code before D037 as well.
+      describe('other dialects are untouched', () => {
+        it('extended: a GE-shaped stable 20-byte frame is still not read or answered', async () => {
+          const adapter = makeAdapter();
+          const writes = await driveHandshake(adapter, makeExtendedScaleInfo());
+          const before = writes.length;
+          // GE_LIVE (#235) with [3] 00 -> 01 and its checksum recomputed.
+          expect(adapter.parseNotification(patched(GE_LIVE, 3, 0x01))).toBeNull();
+          await Promise.resolve();
+          expect(writes.slice(before)).toEqual([]);
+          expect(adapter.completionHoldMs).toBeUndefined();
+        });
+
+        it('18-byte es26m: the barefoot frame still reads weight and impedance at once', async () => {
+          const adapter = makeAdapter();
+          await driveHandshake(adapter, makeEs26mScaleInfo());
+          const reading = adapter.parseNotification(
+            hex('10 0e ff 01 02 26 39 01 f5 01 f3 01 34 9e'),
+          );
+          expect(reading).not.toBeNull();
+          expect(reading!.weight).toBeCloseTo(97.85);
+          expect(reading!.impedance).toBe(501);
+          expect(adapter.completionHoldMs).toBeUndefined();
+          // As waitForRawReading asks it; before D037 the method did not exist.
+          const final = adapter.isFinal ? adapter.isFinal(reading!) : true;
+          expect(final).toBe(true);
+        });
+
+        it.each([
+          ['18-byte es26m', 'es26m'],
+          ['19-byte with no 20-byte stream', '19'],
+        ])('%s: the 0x23 marker shape still triggers the re-query', async (_name, which) => {
+          vi.useFakeTimers();
+          try {
+            const adapter = makeAdapter();
+            const writes = await openSession(
+              adapter,
+              which === 'es26m' ? makeEs26mScaleInfo() : INFO,
+              which === 'es26m' ? {} : { ready: READY, configReq: CONFIG_REQ },
+            );
+            const starts = writes.filter((w) => w[0] === 0x22).length;
+            expect(adapter.parseNotification(END_MARKER)).toBeNull();
+            await vi.advanceTimersByTimeAsync(3000);
+            expect(writes.filter((w) => w[0] === 0x22)).toHaveLength(starts + 1);
+          } finally {
+            vi.useRealTimers();
+          }
+        });
+
+        it.each([
+          ['classic', 'classic'],
+          ['19-byte with no 20-byte stream', '19'],
+        ])('%s: 0x15 and 0x16 still reach the ignore branch', (_name, which) => {
+          const debug = vi.spyOn(bleLog, 'debug').mockImplementation(() => {});
+          try {
+            const adapter = makeAdapter();
+            adapter.onSessionStart();
+            if (which === 'classic') {
+              const info = Buffer.alloc(11);
+              info[0] = 0x12;
+              info[2] = 0xab;
+              info[10] = 1;
+              adapter.parseNotification(info);
+            } else {
+              adapter.parseNotification(INFO);
+            }
+            expect(adapter.parseNotification(COMP_15)).toBeNull();
+            expect(adapter.parseNotification(DONE_16)).toBeNull();
+            const ignored = debug.mock.calls
+              .map((c) => String(c[0]))
+              .filter((l) => l.startsWith('QN: ignoring frame'));
+            expect(ignored).toEqual([
+              `QN: ignoring frame opcode=0x15 len=16 hex=${COMP_15.toString('hex')}`,
+              `QN: ignoring frame opcode=0x16 len=16 hex=${DONE_16.toString('hex')}`,
+            ]);
+          } finally {
+            debug.mockRestore();
+          }
+        });
+      });
+    });
+
     // Every anchor frame a capture shows, rebuilt from its weight. 74.05 and
     // 71.85 sit on the Math.round boundary (7404.999... and 7184.999...).
     it('rebuilds the captured anchor frames byte for byte', () => {
@@ -2862,6 +3353,9 @@ describe('QN per-session reset ordering (#406)', () => {
       'sessionGeneration',
       'sessionStartedScaleSeconds',
       'ae01Chain',
+      // Keyed by reading object; an earlier session's reading is never handed
+      // back, so there is nothing to clear (#331).
+      'provisionalReadings',
     ]);
     vi.useFakeTimers();
     try {
@@ -2926,5 +3420,290 @@ describe('buildUserProfileFrame (#331)', () => {
     const f = buildUserProfileFrame(Number.NaN, Number.POSITIVE_INFINITY);
     expect(f[7]).toBe(33);
     expect((f[8] << 8) | f[9]).toBe(1720);
+  });
+});
+
+// #461: a Physiq (QN-Scale, 18-byte es26m) that delivered its weigh-in as a
+// 0x23 stored record. Every frame below is byte for byte from the reporter's
+// public DEBUG log (node-ble); the address is the one the log shows.
+describe('QN stored record and impedance (#461)', () => {
+  const INFO_461 = Buffer.from([
+    0x12, 0x12, 0xff, 0x25, 0xe0, 0x16, 0x00, 0x05, 0xff, 0x13, 0x07, 0x16, 0x00, 0x00, 0x05, 0x9f,
+    0x32, 0x48,
+  ]);
+  const RECORD_461 = Buffer.from([
+    0x23, 0x14, 0xff, 0x01, 0x01, 0xf0, 0x87, 0xc0, 0x5c, 0x32, 0x1b, 0xfd, 0x10, 0xcf, 0x10, 0xcd,
+    0x00, 0x00, 0x00, 0xd1,
+  ]);
+  const EMPTY_461 = Buffer.from([0x23, 0x14, 0xff, ...new Array<number>(16).fill(0), 0x36]);
+  /** Connect time in the log; the record is stamped 09:23:19. */
+  const CONNECTED_461 = '2026-10-10T09:23:02.077Z';
+
+  /** #283, a classic scale: its 0x12 and the 0x23 it answered with. */
+  const INFO_283 = Buffer.from([
+    0x12, 0x11, 0xff, 0xd3, 0x60, 0x18, 0x00, 0x01, 0xfb, 0x0a, 0x03, 0x19, 0x00, 0x04, 0x05, 0x07,
+    0x9f,
+  ]);
+  const RECORD_283 = Buffer.from([
+    0x23, 0x13, 0xff, 0x04, 0x01, 0x09, 0x11, 0xef, 0x31, 0x18, 0x1a, 0x01, 0xfc, 0x01, 0xf8, 0x00,
+    0x00, 0x00, 0x9c,
+  ]);
+
+  interface SessionOptions {
+    now: string;
+    deviceAddress?: string;
+    manufacturerData?: { id: number; data: Buffer };
+  }
+
+  /**
+   * One session in transport order (onSessionStart, onConnected, frames), with
+   * every write collected. Returns the last reading the frames produced.
+   */
+  async function runSession(
+    adapter: QnScaleAdapter,
+    frames: Buffer[],
+    opts: SessionOptions,
+    writes: number[][] = [],
+  ) {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date(opts.now));
+      const ctx = {
+        write: async (_uuid: string, data: Buffer | number[]) => {
+          writes.push([...data]);
+        },
+        read: async () => Buffer.alloc(0),
+        subscribe: async () => {},
+        profile: defaultProfile(),
+        deviceAddress: opts.deviceAddress ?? '',
+        availableChars: new Set<string>(),
+        ...(opts.manufacturerData ? { manufacturerData: opts.manufacturerData } : {}),
+      } as unknown as ConnectionContext;
+      adapter.onSessionStart?.();
+      await adapter.onConnected(ctx);
+      let reading = null;
+      for (const frame of frames) {
+        reading = adapter.parseNotification(frame) ?? reading;
+        await vi.advanceTimersByTimeAsync(100);
+      }
+      return reading;
+    } finally {
+      vi.useRealTimers();
+    }
+  }
+
+  describe('decodeStoredRecord', () => {
+    it('reads both resistances big-endian at [12..13] and [14..15]', () => {
+      expect(decodeStoredRecord(RECORD_461)).toEqual({
+        weight: 71.65,
+        recordSeconds: 844939399,
+        r50: 4303,
+        r500: 4301,
+      });
+    });
+
+    it('needs at least 16 bytes', () => {
+      expect(decodeStoredRecord(RECORD_461.subarray(0, 15))).toBeNull();
+    });
+  });
+
+  it('reads the #461 record without an advertisement as the raw R50', async () => {
+    const reading = await runSession(makeAdapter(), [INFO_461, RECORD_461], {
+      now: CONNECTED_461,
+    });
+    expect(reading).toEqual({ weight: 71.65, impedance: 4303 });
+  });
+
+  it('still re-queries after the empty record #461 sent first', async () => {
+    const writes: number[][] = [];
+    const adapter = makeAdapter();
+    await runSession(adapter, [INFO_461], { now: CONNECTED_461 }, writes);
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-10-10T09:23:05.302Z'));
+      writes.length = 0;
+      expect(adapter.parseNotification(EMPTY_461)).toBeNull();
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(writes.filter((w) => w[0] === 0x22)).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // A classic scale's 0x23 has its own layout; the session that saw its short
+  // 0x12 keeps reading it exactly as before, which drops this one as stale.
+  it('leaves a classic session alone (#283)', async () => {
+    const reading = await runSession(makeAdapter(), [INFO_283, RECORD_283], {
+      now: '2026-07-19T04:37:40Z',
+    });
+    expect(reading).toBeNull();
+  });
+
+  // The scrambled impedance. The #461 advertisement sets the flag; the #75
+  // Renpho Elis 1 advertisement (bluetoothctl dump in #75) is the same model
+  // family with it clear, and that unit sends ~505 ohm as it is.
+  const ADVERT_461 = {
+    id: 0xffff,
+    data: Buffer.from([
+      0x08, 0x14, 0x01, 0x00, 0x00, 0x25, 0xe0, 0x16, 0x00, 0x05, 0xff, 0x61, 0x08, 0x01, 0x00,
+      0x15,
+    ]),
+  };
+  const ADDRESS_461 = 'FF050016E025';
+  const ADVERT_ELIS1 = {
+    id: 0xffff,
+    data: Buffer.from([
+      0x09, 0x5b, 0x01, 0x00, 0x00, 0x1a, 0x9a, 0x0e, 0x00, 0x04, 0xff, 0x60, 0x08, 0x00, 0x00,
+      0x01,
+    ]),
+  };
+  const ADDRESS_ELIS1 = 'FF04000E9A1A';
+  /** The maintainer's classic unit: 11 bytes, no marker at [11]. */
+  const ADVERT_CLASSIC = {
+    id: 0xffff,
+    data: Buffer.from([0x05, 0x5d, 0x00, 0x00, 0x00, 0x04, 0xa1, 0x13, 0x00, 0x03, 0xff]),
+  };
+
+  describe('decryptQnResistance', () => {
+    it('unscrambles the #461 values to a body resistance', () => {
+      expect(decryptQnResistance(0x10cf)).toBe(502); // 4303, the record's R50
+      expect(decryptQnResistance(0x10cd)).toBe(500); // 4301, its R500
+      expect(decryptQnResistance(0x10dd)).toBe(501); // 4317, the reporter's earlier reading
+    });
+
+    it('is its own inverse for every byte', () => {
+      for (let b = 0; b < 256; b++) {
+        const v = (b << 8) | b;
+        expect(decryptQnResistance(decryptQnResistance(v))).toBe(v);
+      }
+    });
+  });
+
+  describe('qnAdvertTraits', () => {
+    it('reads model 129 with the scrambled flag from the #461 advertisement', () => {
+      expect(qnAdvertTraits(ADVERT_461, ADDRESS_461)).toEqual({ category: 129, scrambled: true });
+    });
+
+    it('reads model 128 without the flag from the #75 Elis 1 advertisement', () => {
+      expect(qnAdvertTraits(ADVERT_ELIS1, ADDRESS_ELIS1)).toEqual({
+        category: 128,
+        scrambled: false,
+      });
+    });
+
+    it('finds no marker in the 11-byte classic advertisement', () => {
+      expect(qnAdvertTraits(ADVERT_CLASSIC, 'FF030013A104')).toEqual({
+        category: null,
+        scrambled: false,
+      });
+    });
+
+    it('ignores an advertisement whose MAC is not the connected device', () => {
+      expect(qnAdvertTraits(ADVERT_461, ADDRESS_ELIS1)).toBeNull();
+    });
+
+    it('skips the MAC check when the transport has no address', () => {
+      expect(qnAdvertTraits(ADVERT_461, '')).toEqual({ category: 129, scrambled: true });
+    });
+
+    it('ignores a company id the vendor SDK does not use', () => {
+      expect(qnAdvertTraits({ ...ADVERT_461, id: 0x1a10 }, ADDRESS_461)).toBeNull();
+      expect(qnAdvertTraits({ ...ADVERT_461, id: 0x01a8 }, ADDRESS_461)).toEqual({
+        category: 129,
+        scrambled: true,
+      });
+    });
+
+    it('needs manufacturer data', () => {
+      expect(qnAdvertTraits(undefined, ADDRESS_461)).toBeNull();
+    });
+  });
+
+  it('unscrambles the #461 record when its advertisement says so', async () => {
+    const reading = await runSession(makeAdapter(), [INFO_461, RECORD_461], {
+      now: CONNECTED_461,
+      deviceAddress: ADDRESS_461,
+      manufacturerData: ADVERT_461,
+    });
+    expect(reading).toEqual({ weight: 71.65, impedance: 502 });
+  });
+
+  it('does not carry the flag into the next session', async () => {
+    const adapter = makeAdapter();
+    await runSession(adapter, [INFO_461], {
+      now: CONNECTED_461,
+      deviceAddress: ADDRESS_461,
+      manufacturerData: ADVERT_461,
+    });
+    const reading = await runSession(adapter, [INFO_461, RECORD_461], { now: CONNECTED_461 });
+    expect(reading).toEqual({ weight: 71.65, impedance: 4303 });
+  });
+
+  it('leaves the record as sent when the advertisement belongs to another device', async () => {
+    const reading = await runSession(makeAdapter(), [INFO_461, RECORD_461], {
+      now: CONNECTED_461,
+      deviceAddress: ADDRESS_ELIS1,
+      manufacturerData: ADVERT_461,
+    });
+    expect(reading).toEqual({ weight: 71.65, impedance: 4303 });
+  });
+
+  it('leaves a classic session alone with its 11-byte advertisement too', async () => {
+    const reading = await runSession(makeAdapter(), [INFO_283, RECORD_283], {
+      now: '2026-07-19T04:37:40Z',
+      deviceAddress: 'FF030013A104',
+      manufacturerData: ADVERT_CLASSIC,
+    });
+    expect(reading).toBeNull();
+  });
+
+  // Live 0x10 path. No live frame from the #461 unit exists, so this pairs its
+  // advertisement (address check skipped) with a real live frame from another
+  // unit (#253, R 501 sent as is): it checks the wiring and the refutation
+  // warning, not a value.
+  describe('live frame', () => {
+    const INFO_253 = Buffer.from([
+      0x12, 0x12, 0xff, 0xcb, 0x89, 0x04, 0x00, 0x04, 0xff, 0x01, 0x17, 0x09, 0x00, 0x00, 0x05,
+      0x9f, 0x30, 0x73,
+    ]);
+    const LIVE_253 = Buffer.from([
+      0x10, 0x0e, 0xff, 0x01, 0x02, 0x21, 0x20, 0x01, 0xf5, 0x01, 0xf3, 0x00, 0xf1, 0x3c,
+    ]);
+
+    it('reads it as sent without the flag', async () => {
+      const reading = await runSession(makeAdapter(), [INFO_253, LIVE_253], {
+        now: '2026-07-10T13:28:40Z',
+      });
+      expect(reading).toEqual({ weight: 84.8, impedance: 501 });
+    });
+
+    it('unscrambles it with the flag, and warns once that the result is not a body', async () => {
+      const warn = vi.spyOn(bleLog, 'warn').mockImplementation(() => {});
+      try {
+        const reading = await runSession(makeAdapter(), [INFO_253, LIVE_253, LIVE_253], {
+          now: '2026-07-10T13:28:40Z',
+          manufacturerData: ADVERT_461,
+        });
+        expect(reading).toEqual({ weight: 84.8, impedance: 4317 });
+        const notABody = warn.mock.calls.filter((c) => String(c[0]).includes('not a body'));
+        expect(notABody).toHaveLength(1);
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it('treats an unscrambled 0xffff as no contact', async () => {
+      // Synthetic: the #253 frame with R50 overwritten (checksum left stale,
+      // this branch does not check it). No scale in our logs sent 0xffff; the
+      // 60000 cut-off is the vendor SDK's.
+      const noContact = Buffer.from(LIVE_253);
+      noContact.writeUInt16BE(0xffff, 7);
+      const reading = await runSession(makeAdapter(), [INFO_253, noContact], {
+        now: '2026-07-10T13:28:40Z',
+        manufacturerData: ADVERT_461,
+      });
+      // R1 reads as 0 (no contact) after unscrambling.
+      expect(reading).toEqual({ weight: 84.8, impedance: 0 });
+    });
   });
 });
