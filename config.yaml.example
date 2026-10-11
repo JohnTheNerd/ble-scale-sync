@@ -117,6 +117,10 @@ users:
     #   - type: intervals
     #     athlete_id: i123456                # Intervals.icu Settings → Developer
     #     api_key: "${INTERVALS_API_KEY}"
+    #   - type: dreeve
+    #     base_url: https://dreeve.example   # your Dreeve APP_URL (Dreeve 5.3.3 or newer)
+    #     token: "${DREEVE_TOKEN}"           # key from Settings -> Security -> API access
+    #     unit_system: metric                # metric | imperial, as Settings -> Appearance
 
   - name: Bob
     slug: bob

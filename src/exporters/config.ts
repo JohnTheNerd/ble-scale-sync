@@ -15,7 +15,8 @@ export type ExporterName =
   | 'intervals'
   | 'runalyze'
   | 'wger'
-  | 'healthlog';
+  | 'healthlog'
+  | 'dreeve';
 
 /**
  * Runtime twin of `ExporterName`, for validating `EXPORTERS=...`.
@@ -38,6 +39,7 @@ const KNOWN_EXPORTERS = new Set<ExporterName>([
   'runalyze',
   'wger',
   'healthlog',
+  'dreeve',
 ]);
 
 /** @internal Exported for the registry-agreement test only. */
@@ -132,6 +134,25 @@ export interface HealthLogConfig {
   syncMeasurements: boolean;
 }
 
+export type DreeveUnitSystem = 'metric' | 'imperial';
+
+export interface DreeveConfig {
+  baseUrl: string;
+  token: string;
+  unitSystem: DreeveUnitSystem;
+}
+
+/**
+ * Dreeve's Appearance unit system, read the same way from config.yaml and
+ * from DREEVE_UNIT_SYSTEM. Case is ignored on both paths, so `Metric` works in
+ * config.yaml as it does in .env, where every value is lowercased; the two
+ * values cannot be confused.
+ */
+export function parseDreeveUnitSystem(raw: string): DreeveUnitSystem | undefined {
+  const value = raw.trim().toLowerCase();
+  return value === 'metric' || value === 'imperial' ? value : undefined;
+}
+
 export interface ExporterConfig {
   exporters: ExporterName[];
   garmin?: GarminConfig;
@@ -146,6 +167,7 @@ export interface ExporterConfig {
   runalyze?: RunalyzeConfig;
   wger?: WgerConfig;
   healthlog?: HealthLogConfig;
+  dreeve?: DreeveConfig;
 }
 
 function fail(msg: string): never {
@@ -432,6 +454,26 @@ export function loadExporterConfig(): ExporterConfig {
     };
   }
 
+  let dreeve: DreeveConfig | undefined;
+  if (exporters.includes('dreeve')) {
+    const baseUrl = process.env.DREEVE_BASE_URL?.trim();
+    if (!baseUrl) {
+      fail('DREEVE_BASE_URL is required when dreeve exporter is enabled.');
+    }
+    const token = process.env.DREEVE_TOKEN?.trim();
+    if (!token) {
+      fail('DREEVE_TOKEN is required when dreeve exporter is enabled.');
+    }
+    const rawUnit = process.env.DREEVE_UNIT_SYSTEM?.trim() ?? '';
+    const unitSystem = parseDreeveUnitSystem(rawUnit);
+    if (!unitSystem) {
+      fail(
+        `DREEVE_UNIT_SYSTEM must be metric or imperial when dreeve exporter is enabled, got '${rawUnit}'.`,
+      );
+    }
+    dreeve = { baseUrl, token, unitSystem };
+  }
+
   return {
     exporters,
     garmin,
@@ -446,5 +488,6 @@ export function loadExporterConfig(): ExporterConfig {
     runalyze,
     wger,
     healthlog,
+    dreeve,
   };
 }

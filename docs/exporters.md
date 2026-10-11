@@ -1,19 +1,19 @@
 ---
 title: Exporters
-description: Configure Garmin Connect, Strava, Intervals.icu, Runalyze, Wger, HealthLog, MQTT, Webhook, InfluxDB, Ntfy, Telegram, and File export targets.
+description: Configure Garmin Connect, Strava, Intervals.icu, Runalyze, Wger, HealthLog, Dreeve, MQTT, Webhook, InfluxDB, Ntfy, Telegram, and File export targets.
 head:
   - - meta
     - name: keywords
-      content: garmin connect scale sync, strava weight sync, intervals.icu wellness weight, runalyze body composition, wger weight sync, healthlog body composition, mqtt home assistant scale, influxdb body weight, smart scale webhook, ntfy notifications, telegram scale notifications, scale data export csv, garmin body composition upload
+      content: garmin connect scale sync, strava weight sync, intervals.icu wellness weight, runalyze body composition, wger weight sync, healthlog body composition, dreeve weight sync, mqtt home assistant scale, influxdb body weight, smart scale webhook, ntfy notifications, telegram scale notifications, scale data export csv, garmin body composition upload
 ---
 
 # Exporters
 
-BLE Scale Sync exports body composition data to 12 targets. The [setup wizard](/guide/configuration#setup-wizard-recommended) walks you through exporter selection, configuration, and connectivity testing.
+BLE Scale Sync exports body composition data to 13 targets. The [setup wizard](/guide/configuration#setup-wizard-recommended) walks you through exporter selection, configuration, and connectivity testing.
 
 Exporters are configured in `global_exporters` (shared by all users). For multi-user setups with separate accounts, see [Per-User Exporters](/multi-user#per-user-exporters). All enabled exporters run in parallel; the process reports an error only if **every** exporter fails.
 
-A weigh-in a scale stored in its memory and sends later keeps its original time. It goes only to exporters that can record a past measurement (Garmin, InfluxDB, file, Intervals, Runalyze, wger, HealthLog), never to MQTT, webhooks or notifications, and it does not end the live weigh-in.
+A weigh-in a scale stored in its memory and sends later keeps its original time. It goes only to exporters that can record a past measurement (Garmin, InfluxDB, file, Intervals, Runalyze, wger, HealthLog, Dreeve), never to MQTT, webhooks or notifications, and it does not end the live weigh-in.
 
 | Target                          | Description                                            |
 | ------------------------------- | ------------------------------------------------------ |
@@ -29,6 +29,7 @@ A weigh-in a scale stored in its memory and sends later keeps its original time.
 | [**Runalyze**](#runalyze)       | Push weight + body composition to Runalyze metrics     |
 | [**Wger**](#wger)               | Push weight + body composition to a Wger instance      |
 | [**HealthLog**](#healthlog)     | Push weight + body composition to a HealthLog instance |
+| [**Dreeve**](#dreeve)           | Push weight to a self-hosted Dreeve instance           |
 
 ## Garmin Connect {#garmin}
 
@@ -479,6 +480,36 @@ HealthLog refuses a second reading with the same type and time with `409`. The e
 
 The startup healthcheck calls HealthLog's public `/api/version` endpoint, which needs no token. It confirms the instance is reachable, not that the token is valid: a wrong or expired token shows up on the first export.
 
+## Dreeve {#dreeve}
+
+Push weight to [Dreeve](https://github.com/dreeveapp/dreeve) (formerly Statistics for Strava), a self-hosted sports and fitness dashboard. It needs **Dreeve 5.3.3 or newer**, the first release with the weight API. Only the weight is sent, since Dreeve has nowhere to store body composition.
+
+| Field         | Required | Default | Description                                                                   |
+| ------------- | -------- | ------- | ----------------------------------------------------------------------------- |
+| `base_url`    | Yes      | (none)  | Your Dreeve `APP_URL`, e.g. `https://dreeve.example`                          |
+| `token`       | Yes      | (none)  | API key (`drv_...`) from **Settings -> Security -> API access**               |
+| `unit_system` | Yes      | (none)  | `metric` or `imperial`, the same as **Settings -> Appearance -> Unit system** |
+
+```yaml
+users:
+  - name: Alice
+    exporters:
+      - type: dreeve
+        base_url: https://dreeve.example
+        token: '${DREEVE_TOKEN}'
+        unit_system: metric
+```
+
+Dreeve keeps its API closed until it has a key. Generate one in the Dreeve admin panel under **Settings -> Security -> API access**, put it in Dreeve's `.env` as `DREEVE_API_KEY`, recreate the Dreeve containers (a restart does not reread `.env`), and use the same key as `token`. It is sent as `Authorization: Bearer <key>`. Do not put a user name or password in `base_url`: such a URL is refused before any request is made.
+
+One Dreeve instance holds the history of one athlete, so Dreeve is a per-user exporter and every person needs their own instance. With more than one user, do not put Dreeve under `global_exporters`: everyone's weigh-ins would land on the same athlete, and only the last one of each day would stay.
+
+Each reading is a `POST /api/v1/athlete/weights` with the weight and its calendar day. Dreeve keeps one weight per day and the last one sent for a day wins, so a retry never creates a duplicate. That is the order of sending, not of weighing: an older reading from the same day that arrives later (a retried export, or a reading replayed from the scale's memory) replaces a newer one. Historical readings replayed from a scale's offline cache land on their original day. The calendar day comes from the host's clock, so in Docker set `TZ` to your time zone (the compose examples do), or a weigh-in close to midnight can land on the wrong day.
+
+Dreeve stores the number without a unit and reads it in its current unit system, so `unit_system` must match **Settings -> Appearance -> Unit system** (case does not matter). With `imperial` the weight is converted to pounds before it is sent. Dreeve does not convert entries it already has when the unit system changes; if you switch it, change `unit_system` as well.
+
+The startup healthcheck calls `GET /api/v1/status` with the key, so it checks both the URL and the key. Dreeve 5.3.0 to 5.3.2 answer that endpoint too but have no weight API; there the export fails with a 404 that says which version it needs. A `401` means a wrong key, or a Dreeve without a valid `DREEVE_API_KEY` (missing, or not `drv_` followed by 64 hex characters), which then refuses every request: check Dreeve's `.env` and recreate its containers.
+
 ## Secrets
 
 Use `${ENV_VAR}` references in YAML for passwords and tokens. The variable must be defined in the environment or in a `.env` file:
@@ -515,6 +546,7 @@ A reading with a timestamp is sent **only to exporters that can record it at tha
 | `runalyze`  | Yes                         |
 | `wger`      | Yes                         |
 | `healthlog` | Yes                         |
+| `dreeve`    | Yes                         |
 | `mqtt`      | No                          |
 | `webhook`   | No                          |
 | `ntfy`      | No                          |
@@ -535,17 +567,18 @@ Every reading taken while the app is running is a live reading and goes to every
 
 At startup, exporters are tested for connectivity. Failures are logged as warnings but don't block the scan.
 
-| Exporter      | Method                         |
-| ------------- | ------------------------------ |
-| MQTT          | Connect + disconnect           |
-| Webhook       | HEAD request                   |
-| InfluxDB      | `/health` endpoint, with token |
-| Ntfy          | `/v1/health` endpoint          |
-| Telegram      | `getChat` endpoint             |
-| Intervals.icu | `GET` wellness record          |
-| Runalyze      | `GET` bodyComposition metric   |
-| Wger          | `GET` userprofile record       |
-| HealthLog     | `GET` public `/api/version`    |
-| Garmin        | None (Python subprocess)       |
-| File          | Directory writable check       |
-| Strava        | None (avoid API rate limits)   |
+| Exporter      | Method                             |
+| ------------- | ---------------------------------- |
+| MQTT          | Connect + disconnect               |
+| Webhook       | HEAD request                       |
+| InfluxDB      | `/health` endpoint, with token     |
+| Ntfy          | `/v1/health` endpoint              |
+| Telegram      | `getChat` endpoint                 |
+| Intervals.icu | `GET` wellness record              |
+| Runalyze      | `GET` bodyComposition metric       |
+| Wger          | `GET` userprofile record           |
+| HealthLog     | `GET` public `/api/version`        |
+| Dreeve        | `GET` `/api/v1/status`, with token |
+| Garmin        | None (Python subprocess)           |
+| File          | Directory writable check           |
+| Strava        | None (avoid API rate limits)       |
