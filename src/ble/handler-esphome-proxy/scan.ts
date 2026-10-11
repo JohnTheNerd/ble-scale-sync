@@ -218,7 +218,9 @@ export async function scanAndReadRaw(opts: ScanOptions): Promise<RawReading> {
           void (async () => {
             let session: Awaited<ReturnType<typeof pool.connectGatt>> | null = null;
             try {
-              session = await pool.connectGatt(address);
+              // Bonded scales (Beurer BF720 family) need the proxy to hold the
+              // bond; see GattSessionOptions.bond.
+              session = await pool.connectGatt(address, { bond: adapter.requiresBonding === true });
               const raw = await withIdleTimeout(
                 (onActivity) =>
                   waitForRawReading(

@@ -194,11 +194,75 @@ If a GATT scale still does not produce readings:
   ([#291](https://github.com/KristianP26/ble-scale-sync/issues/291)). Both are
   fixed; with `debug: true` you now get a `cccd=` line per characteristic and an
   explicit `ESPHome CCCD write ...` line.
-- **The scale needs a bonded or encrypted link:** the ESPHome proxy does not
-  bond, so a scale that demands encryption for its notifications (the Beurer
-  BF7xx consent family, for example) cannot be read over this transport. With
-  debug on it shows as `ESPHome GATT error: handle 0x.. status=5` (or `15`)
-  right after the CCCD write. Those scales need the native Linux BlueZ path.
+- **The scale needs a bonded or encrypted link:** now supported — see
+  [Bonded scales](#bonded-scales-beurer-bf720-family) below. An old log that
+  predates the fix shows the symptom: `ESPHome GATT error: handle 0x.. status=5`
+  (or `15`) right after the CCCD write.
+
+### Bonded scales (Beurer BF720 family)
+
+Some scales refuse to send data on a plain, unencrypted link — the write or
+the notification is dropped until the connection is bonded. The Beurer BF720
+body-composition scale is the known example: its consent and profile writes
+are refused with GATT status 5/15 on a non-bonded link.
+
+This transport now handles them. The bond lives **in the proxy**, not in BLE
+Scale Sync: when a scale that declares `requiresBonding` connects, the handler
+asks the ESPHome proxy to pair with the scale's MAC over the Native API
+(`PAIR`). The ESP32 completes the pairing with the scale in its own stack and
+**persists the bond keys in its flash** (Bluedroid NVS), so they survive
+reboots. On every later connection the handler asks again, and ESPHome
+short-circuits an already-bonded device to an immediate success — which is what
+re-encrypts the link automatically, with no user action.
+
+To use it, three things:
+
+1. **The proxy must be told to keep bonds.** ESPHome's default Bluetooth
+   pairing mode does not store bond keys. Add `auth_req_mode: bond` to the
+   `esp32_ble:` component in your ESPHome device YAML:
+
+   ```yaml
+   esp32_ble:
+     auth_req_mode: bond
+   bluetooth_proxy:
+     active: true
+   ```
+
+   Without this the pairing "succeeds" but nothing is stored, and the scale
+   still refuses the link on the next connect.
+
+2. **Do not also declare a `ble_client:` for the scale's MAC** in the same
+   ESPHome YAML. ESPHome allows one ACL link per peer; a second connection
+   source for the same address arbitrates against the proxy's and the read
+   fails.
+
+3. **Turn on direct poll** if the scale stops advertising once bonded (the
+   common case). The normal flow connects only when the scale advertises, and a
+   bonded scale may advertise rarely or not at all. Direct poll instead opens
+   a GATT session to `scale_mac` on a fixed interval, so a weigh-in is picked
+   up without waiting for an advertisement:
+
+   ```yaml
+   ble:
+     handler: esphome-proxy
+     scale_mac: 'AA:BB:CC:DD:EE:FF'
+     direct_poll: true
+     direct_poll_interval_sec: 30   # default; 5-600
+     session_timeout_sec: 120       # caps one poll session
+   ```
+
+   Each poll is a connect → read → disconnect. A poll that times out with no
+   reading is logged at **debug** (nobody may simply not be on the scale), not
+   as an error. A successful poll connect also counts as proxy liveness, so the
+   transport's silence watchdog does not tear down a healthy-but-quiet link.
+
+**The one thing this cannot do:** supply a passkey. Pairing completes hands-free
+only when the scale's pairing model is Just Works or a numeric comparison the
+proxy auto-accepts. If the scale instead displays a fresh six-digit code you are
+meant to type (the older Beurer BF700 pattern), the exchange cannot finish over
+the Native API — there is no passkey channel. After 30 s the handler logs
+`ESPHome pairing of <mac> timed out ... this transport cannot supply it`. That
+scale needs the native Linux BlueZ path instead.
 
 ### Multiple ESPHome proxies (mesh)
 

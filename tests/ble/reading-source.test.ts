@@ -73,7 +73,7 @@ describe('createReadingSource (#246)', () => {
     ]);
   });
 
-  it('esphome-proxy returns a watcher with 6 ctor args (scaleAuth, weightUnit forwarded) + esphome prefix', async () => {
+  it('esphome-proxy returns a watcher with 7 ctor args (scaleAuth, weightUnit, directPoll forwarded) + esphome prefix', async () => {
     const esphomeProxy = { host: 'h' } as never;
     const plan = await createReadingSource({
       bleHandler: 'esphome-proxy',
@@ -88,6 +88,7 @@ describe('createReadingSource (#246)', () => {
     if (plan.kind !== 'watcher') return;
     expect(plan.failureLogPrefix).toBe('Error processing ESPHome reading');
     expect(plan.watcher).toBeInstanceOf(h.FakeEsphomeWatcher);
+    // directPoll is the 7th arg, undefined when the option is unset.
     expect((plan.watcher as unknown as { args: unknown[] }).args).toEqual([
       esphomeProxy,
       ADAPTERS,
@@ -95,7 +96,26 @@ describe('createReadingSource (#246)', () => {
       PROFILE,
       AUTH,
       'lbs',
+      undefined,
     ]);
+  });
+
+  it('esphome-proxy forwards directPoll when set', async () => {
+    const esphomeProxy = { host: 'h' } as never;
+    const directPoll = { enabled: true, intervalSec: 30, sessionTimeoutSec: 120 };
+    const plan = await createReadingSource({
+      bleHandler: 'esphome-proxy',
+      esphomeProxy,
+      adapters: ADAPTERS,
+      targetMac: 'AA:BB:CC:DD:EE:FF',
+      profile: PROFILE,
+      scaleAuth: AUTH,
+      weightUnit: 'lbs',
+      directPoll,
+    });
+    expect(plan.kind).toBe('watcher');
+    if (plan.kind !== 'watcher') return;
+    expect((plan.watcher as unknown as { args: unknown[] }).args.at(-1)).toEqual(directPoll);
   });
 
   it('mqtt-proxy selected but mqttProxy undefined falls through to poll', async () => {

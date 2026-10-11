@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { BleChar } from '../../../src/ble/shared.js';
 import { normalizeUuid } from '../../../src/ble/types.js';
 import type {
@@ -35,8 +35,8 @@ vi.mock('../../../src/ble/handler-esphome-proxy/pool.js', () => {
         this.subs = this.subs.filter((s) => s !== cb);
       };
     }
-    async connectGatt(mac: string) {
-      connectGattSpy(mac);
+    async connectGatt(mac: string, opts?: { bond?: boolean }) {
+      connectGattSpy(mac, opts);
       if (failConnectWith !== null) throw new Error(failConnectWith);
       if (hangSession) {
         const silent: BleChar = {
@@ -336,5 +336,257 @@ describe('ReadingWatcher manufacturer data handoff (#461)', () => {
     await watcher.nextReading();
     expect(ctxMfg).toEqual([undefined]);
     await watcher.stop();
+  });
+});
+
+/**
+ * Direct-poll mode: a bonded scale (Beurer BF720 family) often stops
+ * advertising once the bond exists, so the advert-triggered GATT path never
+ * fires. Instead the watcher opens a GATT session to `ble.scale_mac` on an
+ * interval, and the bond request rides on the same connect.
+ */
+describe('ReadingWatcher direct poll (bonded scales)', () => {
+  const TARGET = 'AA:BB:CC:DD:EE:50'; // as written in ble.scale_mac
+  const TARGET_LC = TARGET.toLowerCase(); // the watcher normalizes it
+  const DIRECT_POLL = { enabled: true, intervalSec: 5, sessionTimeoutSec: 60 };
+
+  /** An adapter that matches everything — the force_scale_adapter semantics. */
+  function alwaysAdapter(extra: Partial<ScaleAdapter> = {}): ScaleAdapter {
+    return { ...gattAdapter(), matches: () => true, ...extra } as ScaleAdapter;
+  }
+
+  beforeEach(() => {
+    connectGattSpy.mockClear();
+    closeSpy.mockClear();
+    fireDisconnectSpy.mockClear();
+  });
+
+  it('opens a session on the interval and requests the bond for a requiresBonding adapter', async () => {
+    vi.useFakeTimers();
+    try {
+      const watcher = new ReadingWatcher(
+        config,
+        [alwaysAdapter({ requiresBonding: true })],
+        TARGET,
+        undefined,
+        undefined,
+        undefined,
+        { ...DIRECT_POLL },
+      );
+      await watcher.start();
+      // The immediate first tick already connected (initial pairing must not
+      // wait an interval), and the bond request rides the same connect.
+      expect(connectGattSpy).toHaveBeenCalledTimes(1);
+      expect(connectGattSpy).toHaveBeenCalledWith(TARGET_LC, { bond: true });
+      await vi.advanceTimersByTimeAsync(0);
+      const reading = await watcher.nextReading();
+      expect(reading.reading.weight).toBe(82);
+      expect(closeSpy).toHaveBeenCalled();
+
+      // The next interval opens a fresh session.
+      await vi.advanceTimersByTimeAsync(DIRECT_POLL.intervalSec * 1000);
+      expect(connectGattSpy).toHaveBeenCalledTimes(2);
+      await watcher.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not request a bond for a non-bonding adapter', async () => {
+    vi.useFakeTimers();
+    try {
+      const watcher = new ReadingWatcher(
+        config,
+        [alwaysAdapter()],
+        TARGET,
+        undefined,
+        undefined,
+        undefined,
+        { ...DIRECT_POLL },
+      );
+      await watcher.start();
+      expect(connectGattSpy).toHaveBeenCalledWith(TARGET_LC, { bond: false });
+      await watcher.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('stamps the transport liveness on a successful poll connect', async () => {
+    // In a quiet house the bonded scale is the only BLE peer: without this
+    // stamp the advertisement-silence watchdog (30 min) kills a healthy app.
+    vi.useFakeTimers();
+    try {
+      const watcher = new ReadingWatcher(
+        config,
+        [alwaysAdapter()],
+        TARGET,
+        undefined,
+        undefined,
+        undefined,
+        { ...DIRECT_POLL },
+      );
+      await watcher.start();
+      const atStart = watcher.lastTransportActivityMs();
+      await vi.advanceTimersByTimeAsync(DIRECT_POLL.intervalSec * 1000);
+      expect(watcher.lastTransportActivityMs()).toBe(Date.now());
+      expect(watcher.lastTransportActivityMs()).not.toBe(atStart);
+      await watcher.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('caps one poll session at sessionTimeoutSec and logs at debug, not error', async () => {
+    const warn = vi.spyOn(bleLog, 'warn').mockImplementation(() => {});
+    const debug = vi.spyOn(bleLog, 'debug').mockImplementation(() => {});
+    vi.useFakeTimers();
+    try {
+      hangSession = true;
+      const watcher = new ReadingWatcher(
+        config,
+        [alwaysAdapter({ requiresBonding: true })],
+        TARGET,
+        undefined,
+        undefined,
+        undefined,
+        { enabled: true, intervalSec: 60, sessionTimeoutSec: 5 },
+      );
+      await watcher.start();
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(connectGattSpy).toHaveBeenCalledTimes(1);
+      // The cap elapse is the expected outcome (nobody on the scale), not a
+      // failure: no warn, an actionable debug line, and a clean teardown.
+      expect(warn).not.toHaveBeenCalled();
+      expect(debug.mock.calls.map((c) => String(c[0])).join(' | ')).toContain(
+        'no reading within 5s',
+      );
+      expect(fireDisconnectSpy).toHaveBeenCalled();
+      expect(closeSpy).toHaveBeenCalled();
+      // The in-flight guard was released: the next tick reconnects.
+      await vi.advanceTimersByTimeAsync(55_000);
+      expect(connectGattSpy).toHaveBeenCalledTimes(2);
+      await watcher.stop();
+    } finally {
+      hangSession = false;
+      warn.mockRestore();
+      debug.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('skips a tick while an advertisement-triggered session is in flight', async () => {
+    vi.useFakeTimers();
+    try {
+      hangSession = true;
+      const watcher = new ReadingWatcher(
+        config,
+        [gattAdapter()],
+        TARGET,
+        undefined,
+        undefined,
+        undefined,
+        { ...DIRECT_POLL },
+      );
+      await watcher.start();
+      const pool = (
+        watcher as unknown as { pool: { emitAdvert: (i: BleDeviceInfo, m: string) => void } }
+      ).pool;
+      await vi.advanceTimersByTimeAsync(1_000);
+      // A real advert lands while the immediate tick's session is in flight:
+      // both paths must see the same in-flight key and not double-connect.
+      pool.emitAdvert({ localName: 'GATT-scale', serviceUuids: [] }, TARGET);
+      await vi.advanceTimersByTimeAsync(DIRECT_POLL.intervalSec * 1000);
+      expect(connectGattSpy).toHaveBeenCalledTimes(1);
+      await watcher.stop();
+    } finally {
+      hangSession = false;
+      vi.useRealTimers();
+    }
+  });
+
+  it('warns once (with the force_scale_adapter hint) when nothing resolves', async () => {
+    const warn = vi.spyOn(bleLog, 'warn').mockImplementation(() => {});
+    vi.useFakeTimers();
+    try {
+      // gattAdapter matches by name; the scale never advertised, so no name is
+      // cached and a plain connect would be blind.
+      const watcher = new ReadingWatcher(
+        config,
+        [gattAdapter()],
+        TARGET,
+        undefined,
+        undefined,
+        undefined,
+        { ...DIRECT_POLL },
+      );
+      await watcher.start();
+      await vi.advanceTimersByTimeAsync(15_000);
+      const warns = warn.mock.calls
+        .map((c) => String(c[0]))
+        .filter((m) => m.includes('no scale adapter matches'));
+      expect(warns).toHaveLength(1);
+      expect(warns[0]).toContain('ble.force_scale_adapter');
+      expect(connectGattSpy).not.toHaveBeenCalled();
+      await watcher.stop();
+    } finally {
+      warn.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('stop() disarms the poll timer', async () => {
+    vi.useFakeTimers();
+    try {
+      const watcher = new ReadingWatcher(
+        config,
+        [alwaysAdapter()],
+        TARGET,
+        undefined,
+        undefined,
+        undefined,
+        { ...DIRECT_POLL },
+      );
+      await watcher.start();
+      expect(connectGattSpy).toHaveBeenCalledTimes(1); // immediate tick
+      await watcher.stop();
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(connectGattSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('updateConfig disarms and re-arms the poll timer (hot reload)', async () => {
+    vi.useFakeTimers();
+    try {
+      const adapter = alwaysAdapter();
+      const watcher = new ReadingWatcher(
+        config,
+        [adapter],
+        TARGET,
+        undefined,
+        undefined,
+        undefined,
+        { ...DIRECT_POLL },
+      );
+      await watcher.start();
+      const afterStart = connectGattSpy.mock.calls.length;
+      // Like production (runtime/sources.ts), a reload carries the full config,
+      // targetMac included — an absent targetMac is an absent target MAC.
+      watcher.updateConfig({ adapters: [adapter], targetMac: TARGET, directPoll: undefined });
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(connectGattSpy).toHaveBeenCalledTimes(afterStart);
+      watcher.updateConfig({
+        adapters: [adapter],
+        targetMac: TARGET,
+        directPoll: { ...DIRECT_POLL },
+      });
+      await vi.advanceTimersByTimeAsync(DIRECT_POLL.intervalSec * 1000);
+      expect(connectGattSpy).toHaveBeenCalledTimes(afterStart + 1);
+      await watcher.stop();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

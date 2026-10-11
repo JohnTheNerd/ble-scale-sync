@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { openGattSession } from '../../../src/ble/handler-esphome-proxy/gatt.js';
+import { openGattSession, ensurePaired } from '../../../src/ble/handler-esphome-proxy/gatt.js';
 import { normalizeUuid } from '../../../src/ble/types.js';
 
 // macToInt('00:00:00:00:00:01') === 1
@@ -70,6 +70,8 @@ function fakeConnection() {
     writeBluetoothGATTCharacteristicService: vi.fn(async () => ({})),
     notifyBluetoothGATTCharacteristicService: vi.fn(async () => ({})),
     writeBluetoothGATTDescriptorService: vi.fn(async () => ({})),
+    pairBluetoothDeviceService: vi.fn(async () => ({ address: ADDR, paired: true })),
+    unpairBluetoothDeviceService: vi.fn(async () => ({ address: ADDR, paired: false })),
   };
 }
 
@@ -486,5 +488,88 @@ describe('openGattSession', () => {
     const session = await openGattSession({ connection: conn } as never, '00:00:00:00:00:01');
     expect(conn.connectBluetoothDeviceService).toHaveBeenCalledTimes(2);
     await session.close();
+  });
+});
+
+describe('bonding (Beurer BF720 family)', () => {
+  it('bond: true issues one PAIR, after discovery and before the session returns', async () => {
+    const conn = fakeConnection();
+    const session = await openGattSession({ connection: conn } as never, '00:00:00:00:00:01', 0, {
+      bond: true,
+    });
+    expect(conn.pairBluetoothDeviceService).toHaveBeenCalledTimes(1);
+    expect(conn.pairBluetoothDeviceService).toHaveBeenCalledWith(ADDR);
+    // Discovery first: the bond must exist before any subscribe runs, but the
+    // handles above stay valid either way (PAIR does not re-arrange the table).
+    const listOrder = conn.listBluetoothGATTServicesService.mock.invocationCallOrder[0] ?? 0;
+    const pairOrder = conn.pairBluetoothDeviceService.mock.invocationCallOrder[0] ?? 0;
+    expect(pairOrder).toBeGreaterThan(listOrder);
+    await session.close();
+  });
+
+  it('does not issue a PAIR unless bond: true is requested', async () => {
+    const conn = fakeConnection();
+    const session = await openGattSession({ connection: conn } as never, '00:00:00:00:00:01', 0);
+    expect(conn.pairBluetoothDeviceService).not.toHaveBeenCalled();
+    await session.close();
+  });
+
+  it('a refused bond rejects the session and releases the proxy link', async () => {
+    const conn = fakeConnection();
+    conn.pairBluetoothDeviceService = vi.fn(async () => ({
+      address: ADDR,
+      paired: false,
+      error: 'auth complete failed',
+    }));
+    await expect(
+      openGattSession({ connection: conn } as never, '00:00:00:00:00:01', 0, { bond: true }),
+    ).rejects.toThrow(/refused: auth complete failed/);
+    expect(conn.disconnectBluetoothDeviceService).toHaveBeenCalledWith(ADDR);
+  });
+
+  it('ensurePaired resolves on a matching paired response', async () => {
+    const conn = fakeConnection();
+    await expect(ensurePaired(conn, '00:00:00:00:00:01')).resolves.toBeUndefined();
+    expect(conn.pairBluetoothDeviceService).toHaveBeenCalledTimes(1);
+  });
+
+  it('ensurePaired rejects a response for another device (B-04)', async () => {
+    const conn = fakeConnection();
+    conn.pairBluetoothDeviceService = vi.fn(async () => ({ address: 2, paired: true }));
+    await expect(ensurePaired(conn, '00:00:00:00:00:01')).rejects.toThrow(/another device/);
+  });
+
+  it('ensurePaired rejects a refusal, carrying the proxy error string', async () => {
+    const conn = fakeConnection();
+    conn.pairBluetoothDeviceService = vi.fn(async () => ({
+      address: ADDR,
+      paired: false,
+      error: 'already bonded with another device',
+    }));
+    await expect(ensurePaired(conn, '00:00:00:00:00:01')).rejects.toThrow(
+      /refused: already bonded with another device/,
+    );
+  });
+
+  it('ensurePaired rejects with an actionable error when the library cannot pair', async () => {
+    const conn = fakeConnection();
+    delete (conn as Record<string, unknown>).pairBluetoothDeviceService;
+    await expect(ensurePaired(conn, '00:00:00:00:00:01')).rejects.toThrow(
+      /no pairBluetoothDeviceService/,
+    );
+  });
+
+  it('ensurePaired times out when the exchange waits on user input', async () => {
+    vi.useFakeTimers();
+    try {
+      const conn = fakeConnection();
+      conn.pairBluetoothDeviceService = vi.fn(() => new Promise(() => {}));
+      const pending = ensurePaired(conn, '00:00:00:00:00:01');
+      const assertion = expect(pending).rejects.toThrow(/six-digit/);
+      await vi.advanceTimersByTimeAsync(31_000);
+      await assertion;
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

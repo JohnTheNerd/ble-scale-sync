@@ -413,6 +413,30 @@ describe('BleSchema', () => {
     }
   });
 
+  it('accepts ble.direct_poll as true, false, null or omitted', () => {
+    for (const value of [true, false, null]) {
+      expect(BleSchema.safeParse({ direct_poll: value }).success).toBe(true);
+    }
+    expect(BleSchema.safeParse({}).success).toBe(true);
+    for (const value of ['true', 1, 0]) {
+      expect(BleSchema.safeParse({ direct_poll: value }).success).toBe(false);
+    }
+  });
+
+  it('accepts ble.direct_poll_interval_sec within 5 to 600', () => {
+    for (const secs of [5, 30, 600]) {
+      const result = BleSchema.safeParse({ direct_poll_interval_sec: secs });
+      expect(result.success).toBe(true);
+      if (result.success) expect(result.data.direct_poll_interval_sec).toBe(secs);
+    }
+  });
+
+  it('rejects ble.direct_poll_interval_sec outside 5 to 600', () => {
+    for (const secs of [4, 601, 3.5]) {
+      expect(BleSchema.safeParse({ direct_poll_interval_sec: secs }).success).toBe(false);
+    }
+  });
+
   it('accepts ble.preemptive_adapter_reset as true, false, null or omitted (#417)', () => {
     for (const value of [true, false, null]) {
       expect(BleSchema.safeParse({ preemptive_adapter_reset: value }).success).toBe(true);

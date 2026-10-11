@@ -1,5 +1,5 @@
 import type { BleChar, BleDevice } from '../shared.js';
-import { bleLog, errMsg, normalizeUuid } from '../types.js';
+import { bleLog, errMsg, normalizeUuid, withTimeout } from '../types.js';
 import type { EsphomeClient, EsphomeConnection } from './client.js';
 import { macToInt } from './advert.js';
 import {
@@ -46,6 +46,22 @@ export interface GattSession {
   charMap: Map<string, BleChar>;
   device: EsphomeBleDevice;
   close(): Promise<void>;
+}
+
+export interface GattSessionOptions {
+  /**
+   * Request a bond (PAIR) on the proxy once the GATT table is discovered.
+   *
+   * For scales whose data rides on an encrypted link (the Beurer BF720
+   * family: the SIG User Data Service CCCD writes are refused with status
+   * 5/15 on a plain link), the bond must live in the PROXY's own stack -
+   * the app cannot complete SMP over the native API. PAIR here makes the
+   * ESP32 run the exchange locally and persist the keys in its flash; for
+   * an already bonded device ESPHome short-circuits to an immediate
+   * success, so calling it on every session doubles as the re-encryption
+   * path.
+   */
+  bond?: boolean;
 }
 
 interface ConnectResponse extends EsphomeDeviceConnection {
@@ -97,6 +113,81 @@ async function releaseProxyLink(conn: EsphomeConnection, addr: number, mac: stri
 }
 
 /**
+ * A scale that never answers PAIR. The exchange completes without input only
+ * when it can: Just Works, or a numeric comparison the proxy auto-accepts. A
+ * fixed 30 s is well past any exchange the ESP32 can run on its own, so a
+ * deadline here means the scale demanded something the transport cannot give.
+ */
+const PAIR_TIMEOUT_MS = 30_000;
+const PAIR_TIMEOUT_MESSAGE = 'ESPHome pairing timed out';
+
+/** MACs whose first PAIR success this process has already reported at info. */
+const pairLoggedAtInfo = new Set<string>();
+
+/**
+ * Make the proxy hold a bond with `mac` (SMP pairing in the proxy's own
+ * stack, persisted in its flash).
+ *
+ * The app cannot run SMP itself: the native API carries GATT operations but
+ * no passkey channel, so bonding-only scales are only reachable when the
+ * PROXY completes the pairing. For an already bonded device ESPHome
+ * short-circuits PAIR to an immediate success, which is why this is safe to
+ * call on every session of a bonded scale.
+ */
+export async function ensurePaired(conn: EsphomeConnection, mac: string): Promise<void> {
+  if (typeof conn.pairBluetoothDeviceService !== 'function') {
+    throw new Error(
+      `ESPHome proxy cannot pair ${mac}: this @2colors/esphome-native-api build has no ` +
+        'pairBluetoothDeviceService. The transport update that added device pairing is required ' +
+        'for bonded scales.',
+    );
+  }
+  const addr = macToInt(mac);
+  let resp: { address?: number; paired?: boolean; error?: string } | undefined;
+  try {
+    resp = (await withTimeout(
+      serialOnConnection(conn, () => conn.pairBluetoothDeviceService!(addr)),
+      PAIR_TIMEOUT_MS,
+      PAIR_TIMEOUT_MESSAGE,
+    )) as { address?: number; paired?: boolean; error?: string } | undefined;
+  } catch (e) {
+    if (e instanceof Error && e.message === PAIR_TIMEOUT_MESSAGE) {
+      throw new Error(
+        `ESPHome pairing of ${mac} timed out after ${PAIR_TIMEOUT_MS / 1000}s: the exchange ` +
+          "could not complete without user input. If the scale's display showed a six-digit " +
+          'code you were supposed to type, this transport cannot supply it (the ESPHome native ' +
+          'API has no passkey channel): the scale must pair by Just Works or numeric ' +
+          'comparison, or this route does not work for it.',
+      );
+    }
+    throw e;
+  }
+  if (!resp || typeof resp.address !== 'number') {
+    throw new Error(`ESPHome pairing of ${mac} returned no address; the result is unknown`);
+  }
+  if (resp.address !== addr) {
+    // The library's uncorrelated wait (B-04): a pairing result for another
+    // device on this proxy settled our await, so ours is still unknown.
+    throw new Error(
+      `ESPHome pairing response for ${mac} was for another device ` +
+        `(address ${resp.address}); the result is unknown`,
+    );
+  }
+  if (resp.paired === false) {
+    throw new Error(`ESPHome pairing of ${mac} was refused${resp.error ? `: ${resp.error}` : ''}`);
+  }
+  if (!pairLoggedAtInfo.has(mac.toLowerCase())) {
+    pairLoggedAtInfo.add(mac.toLowerCase());
+    bleLog.info(
+      `ESPHome paired ${mac}: the bond is stored on the proxy, so later sessions ` +
+        're-encrypt automatically without a new pairing',
+    );
+  } else {
+    bleLog.debug(`ESPHome pairing ${mac} confirmed`);
+  }
+}
+
+/**
  * Connect to `mac` through an ESPHome proxy client, discover its GATT table,
  * and expose it as the UUID-keyed BleChar map + BleDevice that the shared
  * waitForRawReading() seam expects. ESPHome speaks numeric handles and a uint64
@@ -113,6 +204,7 @@ export async function openGattSession(
   client: EsphomeClient,
   mac: string,
   addressType?: number,
+  opts?: GattSessionOptions,
 ): Promise<GattSession> {
   const conn: EsphomeConnection = client.connection;
   const addr = macToInt(mac);
@@ -167,6 +259,22 @@ export async function openGattSession(
   }
 
   bleLog.debug(`ESPHome connected to ${mac} (mtu=${connResp.mtu ?? 'unknown'})`);
+
+  // Bonded scales (the Beurer BF720 family) refuse the SIG User Data Service
+  // writes on a plain link, so the bond must exist before the adapter
+  // subscribes. PAIR runs AFTER discovery so the handles read above stay
+  // valid, and it short-circuits to immediate success for a device the proxy
+  // already holds a bond with - which is what makes per-session calling the
+  // re-encryption path. A failure leaves the proxy holding the link, so
+  // release it like the discovery failure above does.
+  if (opts?.bond) {
+    try {
+      await ensurePaired(conn, mac);
+    } catch (e) {
+      await releaseProxyLink(conn, addr, mac);
+      throw e;
+    }
+  }
 
   let closed = false;
 

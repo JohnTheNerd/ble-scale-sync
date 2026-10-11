@@ -218,6 +218,15 @@ export interface EsphomeConnection {
     value: Uint8Array,
   ): Promise<unknown>;
   /**
+   * SMP pairing for `address` (BluetoothDeviceRequest.PAIR). The ESP32 runs
+   * the exchange locally and persists the bond in its flash; for an already
+   * bonded device ESPHome short-circuits to an immediate success. Optional so
+   * existing test doubles with a partial `connection` still type-check;
+   * ensurePaired() names the gap when it is missing.
+   */
+  pairBluetoothDeviceService?(address: number): Promise<unknown>;
+  unpairBluetoothDeviceService?(address: number): Promise<unknown>;
+  /**
    * Optional so existing test doubles with a bare `connection: {}` still
    * type-check. Used by safeDisconnect to guarantee teardown.
    */

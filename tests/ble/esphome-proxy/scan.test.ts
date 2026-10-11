@@ -15,6 +15,7 @@ const WRITE = normalizeUuid('2a9c');
 // returns a session whose notify char delivers one complete weight frame.
 const closeSpy = vi.fn(async () => {});
 const fireDisconnectSpy = vi.fn();
+const connectGattSpy = vi.fn();
 // When set, connectGatt hands back a session that never notifies and whose
 // device never reports a disconnect - an ESP32 that dropped off Wi-Fi mid-read.
 let hangSession = false;
@@ -44,7 +45,8 @@ vi.mock('../../../src/ble/handler-esphome-proxy/pool.js', () => {
       this.subs.push(cb);
       return () => {};
     }
-    async connectGatt(_mac: string) {
+    async connectGatt(mac: string, opts?: { bond?: boolean }) {
+      connectGattSpy(mac, opts);
       if (hangSession) {
         const silent: BleChar = {
           async read() {
@@ -130,6 +132,25 @@ describe('scanAndReadRaw GATT single-shot (#116)', () => {
     expect(result.reading.weight).toBe(75);
     expect(result.adapter.name).toBe('GattMock');
     expect(closeSpy).toHaveBeenCalled();
+  });
+
+  it('requests the bond on the connect for a requiresBonding adapter, not for others', async () => {
+    connectGattSpy.mockClear();
+    const bonded = { ...gattAdapter(), requiresBonding: true } as ScaleAdapter;
+    await scanAndReadRaw({
+      adapters: [bonded],
+      profile,
+      esphomeProxy: { host: 'p1', port: 6053, client_info: 'x', additional_proxies: [] } as never,
+    });
+    expect(connectGattSpy).toHaveBeenCalledWith('AA:BB:CC:DD:EE:01', { bond: true });
+
+    connectGattSpy.mockClear();
+    await scanAndReadRaw({
+      adapters: [gattAdapter()],
+      profile,
+      esphomeProxy: { host: 'p1', port: 6053, client_info: 'x', additional_proxies: [] } as never,
+    });
+    expect(connectGattSpy).toHaveBeenCalledWith('AA:BB:CC:DD:EE:01', { bond: false });
   });
 
   // The one-shot path had the same unbounded read as the watcher: on this

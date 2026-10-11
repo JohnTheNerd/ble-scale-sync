@@ -15,7 +15,7 @@ import {
   safeName,
   emitDeduped,
 } from '../advertisement.js';
-import type { Watcher, WatcherConfig } from '../reading-source.js';
+import type { Watcher, WatcherConfig, DirectPollOptions } from '../reading-source.js';
 import { bleLog, errMsg, IMPEDANCE_GRACE_MS, withTimeout, withIdleTimeout } from '../types.js';
 import { AsyncQueue } from '../async-queue.js';
 import { EsphomeProxyPool } from './pool.js';
@@ -62,6 +62,15 @@ export class ReadingWatcher implements Watcher {
   private gattInFlight = new Set<string>();
   /** Set at start and on every advertisement; the proxy liveness signal (#281). */
   private lastAdvertAt: number | null = null;
+  // --- direct poll (bonded scales that stop advertising once bonded) ---
+  /** ble.direct_poll + scale_mac: open a GATT session on an interval instead. */
+  private directPollEnabled = false;
+  private directPollIntervalMs = 30_000;
+  /** ble.session_timeout_sec caps one poll session (plain deadline, not idle). */
+  private sessionTimeoutMs = 120_000;
+  private pollTimer: ReturnType<typeof setInterval> | null = null;
+  /** MACs whose direct-poll resolution failure already warned (LRU-ish). */
+  private pollResolutionWarned = new Set<string>();
 
   /**
    * Last non-empty local name seen per address, so a later nameless frame from
@@ -124,6 +133,7 @@ export class ReadingWatcher implements Watcher {
     profile?: UserProfile,
     scaleAuth?: ScaleAuth,
     weightUnit?: WeightUnit,
+    directPoll?: DirectPollOptions,
   ) {
     this.config = config;
     this.adapters = adapters;
@@ -131,6 +141,36 @@ export class ReadingWatcher implements Watcher {
     this.profile = profile;
     this.scaleAuth = scaleAuth;
     this.weightUnit = weightUnit;
+    this.applyDirectPoll(directPoll);
+  }
+
+  /**
+   * Direct-poll settings, unset included: a reload that removes
+   * `ble.direct_poll` must disarm the timer, not keep the old cadence.
+   */
+  private applyDirectPoll(opts: DirectPollOptions | undefined): void {
+    this.directPollEnabled = opts?.enabled === true;
+    this.directPollIntervalMs = Math.max(1, opts?.intervalSec ?? 30) * 1000;
+    this.sessionTimeoutMs = Math.max(1, opts?.sessionTimeoutSec ?? 120) * 1000;
+    if (this.started && this.pool) this.armPollTimer();
+  }
+
+  /** (Re)arm the direct-poll timer from the current settings; no-op when off. */
+  private armPollTimer(): void {
+    if (this.pollTimer) {
+      clearInterval(this.pollTimer);
+      this.pollTimer = null;
+    }
+    if (!this.directPollEnabled || !this.targetMac || !this.pool) return;
+    this.pollTimer = setInterval(() => void this.pollTick(), this.directPollIntervalMs);
+    // The timer must never hold the process open by itself: the pool's own
+    // sockets and reconnect loop already keep a started watcher alive.
+    this.pollTimer.unref?.();
+    bleLog.info(
+      `Direct poll armed for ${this.targetMac}: a GATT session opens every ` +
+        `${this.directPollIntervalMs / 1000}s (a bonded scale often stops advertising, ` +
+        'so waiting for one would mean waiting forever)',
+    );
   }
 
   async start(): Promise<void> {
@@ -148,6 +188,10 @@ export class ReadingWatcher implements Watcher {
         this.lastAdvertAt = Date.now();
         this.handleAd(info, mac);
       });
+      this.armPollTimer();
+      // First session immediately: for a scale that has never bonded, this is
+      // what makes the initial pairing happen without waiting an interval.
+      if (this.pollTimer) void this.pollTick();
       bleLog.info('ESPHome ReadingWatcher started, listening for advertisements');
     } catch (err) {
       this.started = false;
@@ -158,6 +202,10 @@ export class ReadingWatcher implements Watcher {
 
   async stop(): Promise<void> {
     if (!this.started) return;
+    if (this.pollTimer) {
+      clearInterval(this.pollTimer);
+      this.pollTimer = null;
+    }
     await this.teardown();
     this.started = false;
     this.lastAdvertAt = null;
@@ -183,6 +231,7 @@ export class ReadingWatcher implements Watcher {
     if (config.profile) this.profile = config.profile;
     this.scaleAuth = config.scaleAuth;
     this.weightUnit = config.weightUnit;
+    this.applyDirectPoll(config.directPoll);
   }
 
   private handleAd(rawInfo: BleDeviceInfo, address: string): void {
@@ -242,7 +291,10 @@ export class ReadingWatcher implements Watcher {
       // names the adapter that ran, not the pre-discovery guess.
       let gattAdapter = adapter;
       try {
-        session = await pool.connectGatt(address);
+        // Bonded scales (Beurer BF720 family) refuse the SIG User Data writes
+        // on a plain link; the bond lives in the proxy's stack, so request it
+        // on the proxy now. Non-bonded adapters are untouched (opts unset).
+        session = await pool.connectGatt(address, { bond: adapter.requiresBonding === true });
         // Re-resolve char-aware now that GATT discovery is complete, mirroring
         // the node-ble post-discovery pass (#177). The advertisement-time match
         // keyed only on name + advertised service UUIDs, which lets a generic-
@@ -299,7 +351,110 @@ export class ReadingWatcher implements Watcher {
     })();
   }
 
-  private warnGattFailure(adapterName: string, address: string, reason: string): void {
+  /**
+   * Direct-poll tick for a bonded scale that stops advertising once the bond
+   * exists: open a GATT session to the target MAC on a fixed interval, read
+   * whatever is there, disconnect.
+   *
+   * A successful CONNECT (not a successful read) stamps the transport
+   * liveness: in a quiet house the bonded scale may be the only BLE peer, so
+   * advertisements alone would starve raceWithLiveness and the app would exit
+   * after 30 min of nothing, even though the link is alive and working.
+   *
+   * The session is capped by ble.session_timeout_sec as a PLAIN deadline
+   * (withTimeout, not withIdleTimeout): nobody may be on the scale at all, so
+   * "no data for N seconds" is the expected outcome, not a fault. A cap
+   * elapse logs at debug; anything else is a real failure and warns once per
+   * failure streak like the advertisement path does.
+   */
+  private pollTick(): void {
+    const pool = this.pool;
+    const mac = this.targetMac;
+    if (!pool || !mac) return;
+    if (this.gattInFlight.has(mac)) return; // the advertisement path owns a session
+    this.gattInFlight.add(mac);
+    bleLog.debug(`Direct poll: connecting ${mac}`);
+    void (async () => {
+      let session: Awaited<ReturnType<typeof pool.connectGatt>> | null = null;
+      let adapter: ScaleAdapter | undefined;
+      const pollTimeoutMessage = `Direct poll session timeout for ${mac}`;
+      try {
+        // The scale may never advertise again (that is why this mode exists),
+        // so the advertisement-time evidence is whatever was cached; a forced
+        // adapter (ble.force_scale_adapter) matches any device, including a
+        // completely empty one.
+        const name = this.lastAdvertName.get(mac);
+        const info: BleDeviceInfo = { localName: name ?? '', serviceUuids: [] };
+        adapter = resolveAdapter(info, this.adapters);
+        if (!adapter) {
+          if (!this.pollResolutionWarned.has(mac)) {
+            this.pollResolutionWarned.add(mac);
+            bleLog.warn(
+              `Direct poll for ${mac}: no scale adapter matches — the scale has not ` +
+                'advertised since startup (so no cached name) and none is forced. Let it ' +
+                'advertise once while unbonded, or set ble.force_scale_adapter. Polls ' +
+                'keep retrying meanwhile.',
+            );
+          }
+          return;
+        }
+        session = await pool.connectGatt(mac, { bond: adapter.requiresBonding === true });
+        // See the method doc: this is what keeps the liveness watchdog quiet
+        // while the scale stays silent.
+        this.lastAdvertAt = Date.now();
+        const gattAdapter =
+          resolveAfterDiscovery(
+            info,
+            { characteristicUuids: [...session.charMap.keys()] },
+            this.adapters,
+          ) ?? adapter;
+        const raw = await withTimeout(
+          waitForRawReading(
+            session.charMap,
+            session.device,
+            gattAdapter,
+            this.profile ?? { height: 170, age: 30, gender: 'male', isAthlete: false },
+            mac.replace(/[:-]/g, '').toUpperCase(),
+            this.weightUnit,
+            undefined,
+            this.scaleAuth,
+            undefined,
+            name,
+            undefined,
+          ),
+          this.sessionTimeoutMs,
+          pollTimeoutMessage,
+        );
+        this.gattWarnedFor.delete(mac);
+        this.pushDeduped(mac, raw, raw.reading.weight);
+      } catch (e) {
+        if (e instanceof Error && e.message === pollTimeoutMessage) {
+          bleLog.debug(
+            `Direct poll for ${mac}: no reading within ${this.sessionTimeoutMs / 1000}s ` +
+              '(the scale is off or nobody is on it)',
+          );
+        } else {
+          this.warnGattFailure(
+            adapter?.name ?? 'scale',
+            mac,
+            errMsg(e),
+            'Will retry on the next poll.',
+          );
+        }
+      } finally {
+        session?.device.fireDisconnect();
+        if (session) await session.close();
+        this.gattInFlight.delete(mac);
+      }
+    })();
+  }
+
+  private warnGattFailure(
+    adapterName: string,
+    address: string,
+    reason: string,
+    retryHint = 'Will retry on the next advertisement.',
+  ): void {
     if (this.gattWarnedFor.has(address)) {
       this.gattWarnedFor.delete(address);
       this.gattWarnedFor.set(address, true);
@@ -316,7 +471,7 @@ export class ReadingWatcher implements Watcher {
     this.gattWarnedFor.set(address, true);
     bleLog.warn(
       `${adapterName} at ${address}: GATT read over the ESPHome proxy failed (${reason}). ` +
-        `Will retry on the next advertisement.`,
+        retryHint,
     );
   }
 

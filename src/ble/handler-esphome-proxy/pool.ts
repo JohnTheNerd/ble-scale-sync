@@ -9,7 +9,7 @@ import {
   type EsphomeBleAdvertisement,
 } from './client.js';
 import { toBleDeviceInfo, formatMacAddress, hasLostAdvertisementData } from './advert.js';
-import { openGattSession, type GattSession } from './gatt.js';
+import { openGattSession, type GattSession, type GattSessionOptions } from './gatt.js';
 
 /** A sighting kept fresh for this long counts toward proxy selection. */
 const SIGHTING_TTL_MS = 60_000;
@@ -349,7 +349,7 @@ export class EsphomeProxyPool {
    * it most recently, then blind fallbacks). Throws only when every proxy
    * failed.
    */
-  async connectGatt(mac: string): Promise<GattSession> {
+  async connectGatt(mac: string, opts: GattSessionOptions = {}): Promise<GattSession> {
     const order = this.proxyOrderFor(mac);
     const addressType = this.addressTypes.get(mac.toLowerCase());
     const errors: string[] = [];
@@ -361,7 +361,7 @@ export class EsphomeProxyPool {
       // a rebuild underneath would silently break an in-progress weigh-in.
       this.noteGattStart(id);
       try {
-        const session = await openGattSession(client, mac, addressType);
+        const session = await openGattSession(client, mac, addressType, opts);
         const close = session.close.bind(session);
         let released = false;
         session.close = async (): Promise<void> => {

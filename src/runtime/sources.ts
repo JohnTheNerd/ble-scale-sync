@@ -1,4 +1,5 @@
 import { createReadingSource } from '../ble/index.js';
+import type { DirectPollOptions } from '../ble/index.js';
 import type { ScaleAdapter } from '../interfaces/scale-adapter.js';
 import { resolveUserProfile } from '../config/resolve.js';
 import { ConsecutiveFailureWatchdog } from '../ble/watchdog.js';
@@ -57,6 +58,17 @@ export async function buildReadingSource(
     provision: ctx.config.users[0]?.beurer_provision,
     registerNewUser: ctx.config.users[0]?.beurer_register_new_user,
   });
+  // Re-derived the same way: direct_poll is a normal config flag and must
+  // follow hot reload (and removal) like every other field. Only the
+  // esphome-proxy watcher consumes it; the others ignore the options.
+  const directPoll = (): DirectPollOptions | undefined =>
+    ctx.config.ble?.direct_poll === true
+      ? {
+          enabled: true,
+          intervalSec: ctx.config.ble.direct_poll_interval_sec ?? 30,
+          sessionTimeoutSec: ctx.config.ble.session_timeout_sec ?? 120,
+        }
+      : undefined;
 
   const plan = await createReadingSource({
     bleHandler: ctx.bleHandler,
@@ -68,6 +80,7 @@ export async function buildReadingSource(
     profile: profile(),
     scaleAuth: scaleAuth(),
     weightUnit: ctx.weightUnit,
+    directPoll: directPoll(),
   });
 
   if (plan.kind === 'watcher') {
@@ -96,6 +109,7 @@ export async function buildReadingSource(
           profile: profile(),
           scaleAuth: scaleAuth(),
           weightUnit: ctx.weightUnit,
+          directPoll: directPoll(),
         }),
       onFailure: (err) => {
         if (!(err instanceof TransportWedgedError)) return;

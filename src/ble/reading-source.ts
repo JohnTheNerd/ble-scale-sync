@@ -3,6 +3,21 @@ import type { RawReading } from './shared.js';
 import type { WeightUnit } from '../config/schema.js';
 
 /**
+ * Direct poll for a bonded scale (esphome-proxy transport): instead of
+ * waiting for the scale to advertise, open a GATT session to the configured
+ * `scale_mac` on an interval. Bonded scales often stop advertising once the
+ * bond exists, which would starve the advert-triggered flow entirely.
+ * Ignored by transports that do not support it (only the ESPHome proxy
+ * watcher consumes it).
+ */
+export interface DirectPollOptions {
+  enabled: boolean;
+  intervalSec: number;
+  /** `ble.session_timeout_sec`; caps one poll session (plain deadline, the scale may be off). */
+  sessionTimeoutSec: number;
+}
+
+/**
  * Config delivered to a {@link Watcher} on construction and on hot reload. The
  * shape is uniform across transports; a watcher ignores fields it does not use
  * (ha-bluetooth reads no GATT, so it ignores `scaleAuth` and `weightUnit`).
@@ -19,6 +34,8 @@ export interface WatcherConfig {
    * 'lbs', exactly as on the native transports.
    */
   weightUnit?: WeightUnit;
+  /** Direct-poll mode; see {@link DirectPollOptions}. Unset means off. */
+  directPoll?: DirectPollOptions;
 }
 
 /**

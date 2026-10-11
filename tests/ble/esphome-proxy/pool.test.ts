@@ -131,7 +131,23 @@ describe('EsphomeProxyPool', () => {
     await pool.start();
     fakeClients.get('p1')!._emit('ble', adv(0xaabbccddeeff, -50, 1));
     await pool.connectGatt('AA:BB:CC:DD:EE:FF');
-    expect(openGattSession).toHaveBeenCalledWith(expect.anything(), 'AA:BB:CC:DD:EE:FF', 1);
+    expect(openGattSession).toHaveBeenCalledWith(expect.anything(), 'AA:BB:CC:DD:EE:FF', 1, {});
+    await pool.stop();
+  });
+
+  it('connectGatt forwards session options (bond) to openGattSession', async () => {
+    const pool = new EsphomeProxyPool({
+      host: 'p1',
+      port: 6053,
+      client_info: 'x',
+      additional_proxies: [],
+    } as never);
+    await pool.start();
+    fakeClients.get('p1')!._emit('ble', adv(0xaabbccddeeff, -50, 1));
+    await pool.connectGatt('AA:BB:CC:DD:EE:FF', { bond: true });
+    expect(openGattSession).toHaveBeenCalledWith(expect.anything(), 'AA:BB:CC:DD:EE:FF', 1, {
+      bond: true,
+    });
     await pool.stop();
   });
 

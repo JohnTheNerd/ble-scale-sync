@@ -149,13 +149,35 @@ export const BleSchema = z
     /**
      * Seconds of scale silence that end one GATT session (default 120); every
      * notification restarts the clock. Native BLE handlers only; the mqtt-proxy
-     * and esphome-proxy transports ignore it. Some scales refuse to run a
-     * standalone weigh-in while a host holds the session open (the Beurer BF500
-     * shows "APP", #83), so a shorter session frees the scale sooner. The cost
-     * is more Bluetooth adapter churn per hour, since a timed-out read resets
-     * the adapter on node-ble and disconnects on Noble.
+     * transport ignores it. The esphome-proxy transport uses it as a plain
+     * deadline capping one direct-poll session (see `direct_poll`), where no
+     * body of scale silence is expected because nobody may be on the scale yet.
+     * Some scales refuse to run a standalone weigh-in while a host holds the
+     * session open (the Beurer BF500 shows "APP", #83), so a shorter session
+     * frees the scale sooner. The cost is more Bluetooth adapter churn per
+     * hour, since a timed-out read resets the adapter on node-ble and
+     * disconnects on Noble.
      */
     session_timeout_sec: z.number().int().min(5).max(600).optional().nullable(),
+    /**
+     * Direct-poll mode for the esphome-proxy transport (default off): instead
+     * of waiting for the scale to advertise, open a GATT session to
+     * `scale_mac` on a fixed interval.
+     *
+     * Bonded scales (the Beurer BF720 family) often stop advertising once the
+     * bond exists, which starves the advertisement-triggered flow entirely:
+     * the poll is the trigger instead. Requires `scale_mac`; with a target MAC
+     * and no flag the behavior is exactly the stock advertisement path, so
+     * this is additive. Ignored by every other handler.
+     */
+    direct_poll: z.boolean().optional().nullable(),
+    /**
+     * Direct-poll interval in seconds (default 30 when unset). Each tick opens
+     * one GATT session (connect, read, disconnect) even when nobody is on the
+     * scale, so a weak link pays its cost every tick; 30 keeps that modest
+     * while still picking a weigh-in up within half a minute.
+     */
+    direct_poll_interval_sec: z.number().int().min(5).max(600).optional().nullable(),
     /**
      * Protocol byte the QN handshake echoes back to the scale (#75, #331).
      *

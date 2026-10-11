@@ -12,7 +12,7 @@ import type {
 } from '../config/schema.js';
 import type { ScanOptions, ScanResult, BleHandlerName } from './types.js';
 import type { RawReading } from './shared.js';
-import type { Watcher } from './reading-source.js';
+import type { Watcher, DirectPollOptions } from './reading-source.js';
 import { bleLog, errMsg } from './types.js';
 import { ReadingWatcher } from './handler-mqtt-proxy/index.js';
 import { HANDLER_LABELS, rethrowAsTransportError } from './transport-availability.js';
@@ -20,7 +20,7 @@ import type { HandlerKey } from './transport-availability.js';
 
 export type { ScanOptions, ScanResult } from './types.js';
 export type { RawReading } from './shared.js';
-export type { Watcher, WatcherConfig } from './reading-source.js';
+export type { Watcher, WatcherConfig, DirectPollOptions } from './reading-source.js';
 
 /**
  * Resolved BLE handler identifier. The transport switch in this file used to
@@ -152,6 +152,8 @@ export interface ReadingSourceOptions {
   profile: UserProfile;
   scaleAuth?: ScaleAuth;
   weightUnit?: WeightUnit;
+  /** Direct-poll mode; consumed by the esphome-proxy watcher only. */
+  directPoll?: DirectPollOptions;
 }
 
 /**
@@ -197,6 +199,7 @@ export async function createReadingSource(opts: ReadingSourceOptions): Promise<R
       opts.profile,
       opts.scaleAuth,
       opts.weightUnit,
+      opts.directPoll,
     );
     return { kind: 'watcher', watcher, failureLogPrefix: 'Error processing ESPHome reading' };
   }
