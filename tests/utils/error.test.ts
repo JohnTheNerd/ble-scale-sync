@@ -81,9 +81,14 @@ describe('errMsg() with credentials in a fetch error', () => {
 
   it('hides the whole password in a stack and keeps its frames', async () => {
     const err = (await fetchError('https://user:s3cret PW@example.invalid/hook')) as Error;
-    const stack = redactSecrets(err.stack ?? '');
+    const raw = err.stack ?? '';
+    const stack = redactSecrets(raw);
     expect(stack).not.toContain('s3cret');
-    expect(stack).toMatch(/https:\/\/\*\*\*@example\.invalid\/hook\n {4}at /);
+    expect(stack).toContain('https://***@example.invalid/hook');
+    // Whether undici's stack carries frames differs between Node builds (the CI
+    // Node 24 printed none), so the frames are compared rather than required.
+    const frames = (s: string) => s.split('\n').filter((l) => /^ {4}at /.test(l));
+    expect(frames(stack)).toEqual(frames(raw));
   });
 
   // fetch repeats a URL it cannot parse, so a webhook URL missing its scheme,
