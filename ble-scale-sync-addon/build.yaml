@@ -1,14 +1,6 @@
-# The application image this add-on wraps, pinned to the release the add-on
-# reports in config.yaml. Never edit the tags by hand: release-please rewrites
-# them on every release PR (generic updater, the marker at the end of each
-# line, listed under extra-files in .release-please-config.json), together with
-# the add-on version. A floating :latest let an add-on of one version wrap any
-# application version (#318, review I-03).
-#
-# Right after a release the new tag can take a few minutes to appear on GHCR.
-# An update in that window fails to build and the installed version keeps
-# running; retrying once the image exists succeeds.
+# Pinned to this fork's Phase A build (bonded-scale pairing + direct poll).
+# Produced by this repo's Actions "Docker" workflow, manual dispatch, tag bf720.
 build_from:
-  amd64: ghcr.io/kristianp26/ble-scale-sync:1.32.0 # x-release-please-version
-  aarch64: ghcr.io/kristianp26/ble-scale-sync:1.32.0 # x-release-please-version
-  armv7: ghcr.io/kristianp26/ble-scale-sync:1.32.0 # x-release-please-version
+  amd64: ghcr.io/JohnTheNerd/ble-scale-sync:bf720
+  aarch64: ghcr.io/JohnTheNerd/ble-scale-sync:bf720
+  armv7: ghcr.io/JohnTheNerd/ble-scale-sync:bf720

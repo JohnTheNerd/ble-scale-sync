@@ -1,8 +1,6 @@
-name: BLE Scale Sync
-# x-release-please-start-version
+name: BLE Scale Sync (BF720)
 version: 1.32.0
-# x-release-please-end
-slug: ble-scale-sync
+slug: ble-scale-sync-bf720
 description: >-
   Read BLE smart scales and export to Garmin Connect, MQTT (HA auto-discovery),
   InfluxDB, and more
