@@ -290,7 +290,7 @@ To add a new export target:
 5. Add a registry entry in `src/exporters/registry.ts` with `{ schema, factory }` (the registry is the only place exporters are constructed)
 6. Add tests in `tests/exporters/` (including `ExportContext` behavior), and raise the expected exporter count in `tests/exporters/registry.test.ts`
 7. Document the fields in a section of `docs/exporters.md`, the variables in `.env.example`, and a commented example in `config.yaml.example` (under `users[].exporters` when `supportsGlobal` is `false`, under `global_exporters` otherwise)
-8. Run `npm run check:counts:write` to update the exporter count on the published pages. `docs/exporters.md` and `docs/guide/configuration.md` also state it in prose, which the tool does not cover, so update those by hand, and add the name where the other exporters are listed (`README.md`, `docs/index.md`)
+8. Run `npm run check:counts:write` to update the exporter count on the published pages. `docs/exporters.md` and `docs/guide/configuration.md` also state it in prose, which the tool does not cover, so update those by hand, and add the name where the other exporters are listed (`README.md`, `docs/index.md` and others; grep for an existing exporter name)
 
 ## Pull Request Guidelines
 
