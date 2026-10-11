@@ -137,7 +137,7 @@ Yes. During the first login, `setup-garmin` prompts for the 2FA code. Tokens are
 
 ### Can each household member sync to a different Garmin account?
 
-Yes. Define `exporters` at the user level. They are added to `global_exporters`, and a type a user configures for themselves (their own Garmin) replaces the global entry of that type for that user. Each user can have their own Garmin, Strava, MQTT, and File exporters independently. See [Per-user exporters](/multi-user#per-user-exporters).
+Yes. Define `exporters` at the user level. They are added to `global_exporters` for that user, and a user's own Garmin replaces a global Garmin for them. Each user can have their own Garmin, Strava, MQTT, and File exporters independently. See [Per-user exporters](/multi-user#per-user-exporters).
 
 ### Does it work with Apple Health, Google Fit, or Fitbit?
 
