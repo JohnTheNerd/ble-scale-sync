@@ -61,6 +61,16 @@ const REDACTIONS: ReadonlyArray<Redaction> = [
   ],
   // Case-sensitive and 8+ characters, so prose such as "Basic auth" is left alone.
   [/\b(Bearer|Basic) [A-Za-z0-9._~+/-]{8,}=*/g, (_m, scheme) => `${scheme} ***`],
+  // A secret in the query string (`?token=`, `api_key=`, `X-Plex-Token=`) and a
+  // Telegram bot token in the path. fetch repeats such a URL whole when it
+  // cannot parse it, as a webhook URL missing its `https://` or with a bad
+  // port, and when it also carries userinfo. The name prefix is bounded and
+  // must end in `_` or `-`, so `monkey=` or `keys=` stay as they are.
+  [
+    /([?&](?:[\w-]{0,16}[_-])?(?:token|key|apikey|secret|password|passwd|pass|pwd|auth|signature|sig|ticket)=)[^&#\s"'<>),;]+/gi,
+    (_m, name) => `${name}***`,
+  ],
+  [/(\/bot)\d+:[\w-]+/g, (_m, path) => `${path}***`],
 ];
 
 /** Hide credentials in text bound for a log, a file or a notification. */

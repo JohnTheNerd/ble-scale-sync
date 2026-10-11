@@ -86,6 +86,31 @@ describe('errMsg() with credentials in a fetch error', () => {
     expect(stack).toMatch(/https:\/\/\*\*\*@example\.invalid\/hook\n {4}at /);
   });
 
+  // fetch repeats a URL it cannot parse, so a webhook URL missing its scheme,
+  // or with a port out of range, carries its query string into the message.
+  it('hides query string secrets of a URL fetch cannot parse', async () => {
+    const err = await fetchError('example.invalid/hook?token=SECRETQ&api_key=SECRETK&n=1');
+    expect((err as Error).message).toContain('SECRETQ');
+    const msg = errMsg(err);
+    expect(msg).not.toMatch(/SECRET[QK]/);
+    expect(msg).toContain('example.invalid/hook?token=***&api_key=***&n=1');
+  });
+
+  it('hides a query string secret after the userinfo', async () => {
+    const err = await fetchError('https://user:pw@example.invalid/hook?access_token=SECRETQ');
+    expect((err as Error).message).toContain('SECRETQ');
+    expect(errMsg(err)).toContain('https://***@example.invalid/hook?access_token=***');
+  });
+
+  it('hides a Telegram bot token in the path of a URL fetch cannot parse', async () => {
+    const token = '123456:fake-bot-token-for-tests';
+    const err = await fetchError(`https://api.telegram.org:99999/bot${token}/sendMessage`);
+    expect((err as Error).message).toContain(token);
+    const msg = errMsg(err);
+    expect(msg).not.toContain('fake-bot');
+    expect(msg).toContain('/bot***/sendMessage');
+  });
+
   it('hides a header value fetch rejects for a newline', async () => {
     const err = await fetchError('http://127.0.0.1:9/x', {
       headers: { Authorization: 'Bearer drv_SECRET\nX' },
@@ -115,6 +140,9 @@ describe('redactSecrets()', () => {
       'Token refreshed successfully.',
       'Intervals.icu uses HTTP Basic auth',
       'mail me at someone@example.com',
+      'POST https://influx.lan/api/v2/write?org=home&bucket=scale&precision=ms failed',
+      'GET /search?monkey=1&keys=3&keyboard=us',
+      'GET /bots/list and /bot/help',
     ]) {
       expect(redactSecrets(text)).toBe(text);
     }
