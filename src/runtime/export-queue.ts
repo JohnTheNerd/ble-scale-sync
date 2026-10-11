@@ -4,7 +4,7 @@ import { dirname, join, resolve } from 'node:path';
 import { atomicWrite } from '../config/write.js';
 import { defaultEnvPath } from '../config/paths.js';
 import { createLogger } from '../logger.js';
-import { errMsg } from '../utils/error.js';
+import { errMsg, redactSecrets } from '../utils/error.js';
 import type { BodyComposition } from '../interfaces/scale-adapter.js';
 import type { Exporter, ExportContext } from '../interfaces/exporter.js';
 
@@ -306,7 +306,14 @@ export function saveQueue(path: string, entries: QueuedExport[]): boolean {
     // atomicWrite rewrites the whole file (tmp + rename) and applies 0600, the
     // same mode config.yaml gets. The line format is for legibility, not for
     // append-durability: there is no append path here.
-    atomicWrite(path, entries.map((e) => JSON.stringify(e)).join('\n') + '\n');
+    //
+    // lastError is redacted on every write, not only where it is recorded: an
+    // entry queued by a version without redaction keeps the raw fetch text,
+    // password included, until this rewrites it.
+    const lines = entries.map((e) =>
+      JSON.stringify(e.lastError ? { ...e, lastError: redactSecrets(e.lastError) } : e),
+    );
+    atomicWrite(path, lines.join('\n') + '\n');
     return true;
   } catch (err) {
     log.warn(`Could not write the retry queue: ${errMsg(err)}`);

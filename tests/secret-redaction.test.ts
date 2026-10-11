@@ -7,7 +7,7 @@ import { WebhookExporter } from '../src/exporters/webhook.js';
 import { NtfyExporter } from '../src/exporters/ntfy.js';
 import { formatNotification } from '../src/exporters/notification-message.js';
 import { dispatchExports } from '../src/orchestrator.js';
-import { saveQueue, flushQueue, type QueuedExport } from '../src/runtime/export-queue.js';
+import { saveQueue, flushQueue, enqueue, type QueuedExport } from '../src/runtime/export-queue.js';
 import type { Exporter } from '../src/interfaces/exporter.js';
 import type { BodyComposition } from '../src/interfaces/scale-adapter.js';
 
@@ -165,6 +165,28 @@ describe('credentials in the retry queue file', () => {
 
   afterEach(() => {
     fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  // A file written by a version without redaction holds the raw text. The next
+  // write of the queue, here the one that adds a new failure, must not carry it
+  // over.
+  it('redacts a lastError that an older version left in the file', () => {
+    const now = Date.now();
+    const old: QueuedExport = {
+      exporter: 'webhook',
+      payload: PAYLOAD,
+      queuedAt: new Date(now - 60_000).toISOString(),
+      attempts: 1,
+      lastError: `Request cannot be constructed from a URL that includes credentials: ${CREDENTIAL_URL}`,
+    };
+    fs.writeFileSync(file, JSON.stringify(old) + '\n');
+
+    enqueue(file, { ...old, exporter: 'influxdb', queuedAt: new Date(now).toISOString() }, now);
+
+    const stored = fs.readFileSync(file, 'utf-8');
+    expect(stored.trim().split('\n')).toHaveLength(2);
+    expect(stored).toContain('https://***@example.invalid/hook');
+    expect(stored).not.toContain(SECRET);
   });
 
   it('stores a redacted lastError when a queued export throws the fetch error', async () => {
