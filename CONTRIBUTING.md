@@ -286,9 +286,11 @@ To add a new export target:
    - Accept optional `ExportContext` in `export(data, context?)` for multi-user support
 2. Add the name to the `ExporterName` type and `KNOWN_EXPORTERS` set in `src/exporters/config.ts`
 3. Add env var parsing in `src/exporters/config.ts` (for `.env` fallback path)
-4. Add a registry entry in `src/exporters/registry.ts` with `{ schema, factory }` (the registry is the only place exporters are constructed)
-5. Add tests in `tests/exporters/` (including `ExportContext` behavior)
-6. Document config fields in `README.md` and `.env.example`
+4. Map the parsed values to the config field names in `loadEnvConfig()` in `src/config/env-load.ts`, and add your minimal variables to the `builds every known exporter from its minimal .env variables` test in `tests/config/load.test.ts`. That test fails for any exporter the `.env` path cannot build.
+5. Add a registry entry in `src/exporters/registry.ts` with `{ schema, factory }` (the registry is the only place exporters are constructed)
+6. Add tests in `tests/exporters/` (including `ExportContext` behavior), and raise the expected exporter count in `tests/exporters/registry.test.ts`
+7. Document the fields in a section of `docs/exporters.md`, the variables in `.env.example`, and a commented example in `config.yaml.example` (under `users[].exporters` when `supportsGlobal` is `false`, under `global_exporters` otherwise)
+8. Run `npm run check:counts:write` to update the exporter count on the published pages. `docs/exporters.md` and `docs/guide/configuration.md` also state it in prose, which the tool does not cover, so update those by hand, and add the name where the other exporters are listed (`README.md`, `docs/index.md`)
 
 ## Pull Request Guidelines
 
