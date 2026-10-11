@@ -27,9 +27,22 @@ function hideToLastAt(match: string, prefix: string, rest: string): string {
   return at < 0 ? match : `${prefix}***${rest.slice(at)}`;
 }
 
+const URL_SCHEME = /^[a-z][a-z0-9+.-]{0,31}:\/\//i;
+
 const REDACTIONS: ReadonlyArray<Redaction> = [
-  // An unparseable URL may hold a space, so the word rule below cannot see its end.
-  [/(Failed to parse URL from )([^\r\n]*)/g, (m, prefix, rest) => hideToLastAt(m, prefix, rest)],
+  // fetch ends its message with the URL as it was given, and that may hold a
+  // space, a tab or a line break: the URL parser accepts a space in the
+  // userinfo and drops tabs and line breaks, so such a URL is refused for its
+  // credentials, not for its shape. The word rule below would stop at the
+  // first of them, short of the `@`. Here the URL runs to the end of the text,
+  // or to the first frame when the message heads a stack.
+  [
+    /(that includes credentials: |Failed to parse URL from )([\s\S]*?)(?=\n {4}at |$)/g,
+    (m, prefix, url) => {
+      const scheme = URL_SCHEME.exec(url)?.[0] ?? '';
+      return hideToLastAt(m, prefix + scheme, url.slice(scheme.length));
+    },
+  ],
   // Anchored on `://` and the scheme checked behind it, bounded: every debug
   // line passes here, and an unbounded scheme would rescan a long hex dump from
   // each of its characters.

@@ -63,6 +63,29 @@ describe('errMsg() with credentials in a fetch error', () => {
     expect(errMsg(err)).not.toContain('pa ss');
   });
 
+  // The URL parser accepts a space in the userinfo and drops tabs and line
+  // breaks, so fetch refuses these for their credentials and echoes the URL as
+  // given, whitespace and all.
+  it.each([
+    ['a space', ' '],
+    ['a tab', '\t'],
+    ['a line break', '\n'],
+  ])('hides the whole password when it holds %s', async (_name, gap) => {
+    const err = await fetchError(`https://user:s3cret${gap}PW@example.invalid/hook`);
+    expect((err as Error).message).toContain(`s3cret${gap}PW`);
+    const msg = errMsg(err);
+    expect(msg).not.toContain('s3cret');
+    expect(msg).not.toContain('PW@');
+    expect(msg).toContain('https://***@example.invalid/hook');
+  });
+
+  it('hides the whole password in a stack and keeps its frames', async () => {
+    const err = (await fetchError('https://user:s3cret PW@example.invalid/hook')) as Error;
+    const stack = redactSecrets(err.stack ?? '');
+    expect(stack).not.toContain('s3cret');
+    expect(stack).toMatch(/https:\/\/\*\*\*@example\.invalid\/hook\n {4}at /);
+  });
+
   it('hides a header value fetch rejects for a newline', async () => {
     const err = await fetchError('http://127.0.0.1:9/x', {
       headers: { Authorization: 'Bearer drv_SECRET\nX' },
