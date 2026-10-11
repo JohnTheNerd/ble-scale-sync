@@ -97,6 +97,22 @@ describe('redactSecrets()', () => {
     }
   });
 
+  // Every log line passes here. A rule that rescanned the rest of the text from
+  // each place it could start (`scheme://\S*@` from every `://`) took seconds on
+  // these and minutes on a 1 MB line; linear, each is a millisecond or two.
+  it('stays linear on long lines that repeat what a rule looks for', () => {
+    const lines = [
+      `[${Array.from({ length: 8000 }, () => '"http://h.example/x"').join(',')}]`,
+      'Headers.append: "'.repeat(16000),
+      'Failed to parse URL from x'.repeat(10000),
+    ];
+    for (const line of lines) {
+      const started = performance.now();
+      expect(redactSecrets(line)).toBe(line);
+      expect(performance.now() - started).toBeLessThan(250);
+    }
+  });
+
   it('hides a password that itself contains @ and /', () => {
     expect(redactSecrets('at mqtt://user:p@ss/w0rd@broker:1883 now')).toBe(
       'at mqtt://***@broker:1883 now',
