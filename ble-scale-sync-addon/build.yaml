@@ -1,6 +1,8 @@
 # Pinned to this fork's Phase A build (bonded-scale pairing + direct poll).
 # Produced by this repo's Actions "Docker" workflow, manual dispatch, tag bf720.
+# The GHCR owner is lowercase: docker references must be, and GHCR normalizes
+# JohnTheNerd -> johnthenerd on push.
 build_from:
-  amd64: ghcr.io/JohnTheNerd/ble-scale-sync:bf720
-  aarch64: ghcr.io/JohnTheNerd/ble-scale-sync:bf720
-  armv7: ghcr.io/JohnTheNerd/ble-scale-sync:bf720
+  amd64: ghcr.io/johnthenerd/ble-scale-sync:bf720
+  aarch64: ghcr.io/johnthenerd/ble-scale-sync:bf720
+  armv7: ghcr.io/johnthenerd/ble-scale-sync:bf720
