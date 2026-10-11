@@ -104,7 +104,8 @@ users:
     # beurer_user_index: 1                # scale user slot the code belongs to
     # beurer_provision: false             # write this profile into a scale that has none stored
 
-    # Per-user exporters (optional, override global_exporters for this user):
+    # Per-user exporters (optional). They are added to global_exporters; a type
+    # listed here replaces the global entry of that type for this user.
     # exporters:
     #   - type: garmin
     #     email: alice@example.com
@@ -121,6 +122,14 @@ users:
     #     base_url: https://dreeve.example   # your Dreeve APP_URL (Dreeve 5.3.3 or newer)
     #     token: "${DREEVE_TOKEN}"           # key from Settings -> Security -> API access
     #     unit_system: metric                # metric | imperial, as Settings -> Appearance
+    #   - type: wger                         # self-hosted weight/workout manager
+    #     base_url: https://wger.de          # your instance URL
+    #     token: "${WGER_TOKEN}"             # API key from <base_url>/en/user/api-key
+    #     sync_measurements: true            # also push body fat/water/muscle/bone
+    #   - type: healthlog                    # self-hosted health tracker
+    #     base_url: https://healthlog.example  # your instance URL
+    #     token: "${HEALTHLOG_TOKEN}"        # Measurement ingest token (Settings -> API & Tokens)
+    #     sync_measurements: true            # also push body fat/water/muscle/bone/visceral
 
   - name: Bob
     slug: bob
@@ -132,7 +141,8 @@ users:
     last_known_weight: 85.5
 
 # --- Global Exporters ---
-# Shared by all users (unless a user defines their own "exporters" list).
+# Shared by all users; a user's own exporter of the same type replaces the global
+# one for that user.
 # All enabled exporters run in parallel.
 
 global_exporters:
@@ -195,18 +205,6 @@ global_exporters:
   # - type: file
   #   file_path: "./measurements.csv"      # path to output file
   #   format: csv                          # "csv" or "jsonl"
-
-  # -- Wger (self-hosted weight/workout manager) --
-  # - type: wger
-  #   base_url: https://wger.de            # your instance URL
-  #   token: "${WGER_TOKEN}"               # API key from <base_url>/en/user/api-key
-  #   sync_measurements: true              # also push body fat/water/muscle/bone
-
-  # -- HealthLog (self-hosted health tracker) --
-  # - type: healthlog
-  #   base_url: https://healthlog.example  # your instance URL
-  #   token: "${HEALTHLOG_TOKEN}"          # Measurement ingest token (Settings -> API & Tokens)
-  #   sync_measurements: true              # also push body fat/water/muscle/bone/visceral
 
 # --- Runtime Settings ---
 
