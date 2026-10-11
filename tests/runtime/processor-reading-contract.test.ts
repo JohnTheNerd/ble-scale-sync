@@ -422,3 +422,35 @@ describe('E-10: a shutdown during an export is named, not silent', () => {
     expect(warned).toMatch(/\[garmin\] had not finished/);
   });
 });
+
+describe('the retry queue file and credentials in an export error', () => {
+  it('queues a redacted lastError when an exporter returns the raw fetch text', async () => {
+    // The real fetch message, unredacted: the exporter hands it back without
+    // errMsg(), so the orchestrator is what must catch it.
+    const raw = await fetch('https://user:s3cretPW@example.invalid/hook').then(
+      () => '',
+      (err: Error) => err.message,
+    );
+    expect(raw).toContain('s3cretPW');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'reading-contract-'));
+    try {
+      const queuePath = path.join(dir, 'queue.jsonl');
+      const garmin = exporter('garmin', true, async () => ({ success: false, error: raw }));
+      const ctx = makeCtx([user({})], { retryFailedExports: true, exportQueuePath: queuePath });
+
+      await processReading(
+        ctx,
+        { reading: { weight: 82, impedance: 500 }, adapter: recordingAdapter() },
+        { singleUserExporters: [garmin] },
+      );
+
+      const queued = JSON.parse(fs.readFileSync(queuePath, 'utf-8').trim()) as {
+        lastError?: string;
+      };
+      expect(queued.lastError).toContain('https://***@example.invalid/hook');
+      expect(queued.lastError).not.toContain('s3cretPW');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
