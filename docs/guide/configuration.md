@@ -604,7 +604,7 @@ global_exporters:
     password: '${GARMIN_PASSWORD}'
 ```
 
-Shared by all users unless a user defines their own `exporters` list. See [Exporters](/exporters) for all 13 targets and their configuration fields.
+Shared by all users. A user's own `exporters` are added to them, and a type the user configures for themselves replaces the global entry of that type for that user. See [Exporters](/exporters) for all 13 targets and their configuration fields.
 
 ### Runtime
 

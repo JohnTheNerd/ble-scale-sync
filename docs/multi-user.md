@@ -90,7 +90,7 @@ users:
 
 global_exporters:
   - type: influxdb
-    # ... shared by users without their own exporters list
+    # ... shared by Alice and Bob, since neither has an influxdb of their own
 ```
 
 ::: warning One token directory per account
