@@ -1,3 +1,5 @@
+import { redactSecrets } from './utils/error.js';
+
 export enum LogLevel {
   DEBUG = 0,
   INFO = 1,
@@ -40,7 +42,9 @@ export function createLogger(scope: string): Logger {
   const prefix = `[${scope}]`;
   const debugPrefix = `[${scope}:debug]`;
   const timestamp = (): string => new Date().toISOString().replace('T', ' ').replace('Z', '');
-  const fmt = (pfx: string, msg: string): string => {
+  const fmt = (pfx: string, raw: string): string => {
+    // The last net: also covers an `err.message` or stack logged without errMsg().
+    const msg = redactSecrets(raw);
     const ts = timestamp();
     const nl = msg.match(/^(\n+)/);
     return nl ? `${nl[1]}${ts} ${pfx} ${msg.slice(nl[1].length)}` : `${ts} ${pfx} ${msg}`;

@@ -56,6 +56,34 @@ describe('createLogger()', () => {
     const output = logSpy.mock.calls[0][0] as string;
     expect(output).toMatch(/^\n\d{4}-\d{2}-\d{2} .+ \[S\] starting$/);
   });
+
+  // The last net under every caller that logs err.message or a stack itself
+  // rather than going through errMsg().
+  it('hides URL credentials at every level', () => {
+    const log = createLogger('Sync');
+    log.debug('probe https://u:pw1@h/x');
+    log.info('probe https://u:pw2@h/x');
+    log.warn('probe https://u:pw3@h/x');
+    log.error('probe https://u:pw4@h/x');
+    const lines = [...logSpy.mock.calls, ...warnSpy.mock.calls, ...errorSpy.mock.calls].map(
+      (c) => c[0] as string,
+    );
+    expect(lines).toHaveLength(4);
+    for (const line of lines) {
+      expect(line).not.toMatch(/pw\d/);
+      expect(line).toMatch(/\[Sync(:debug)?\] probe https:\/\/\*\*\*@h\/x$/);
+    }
+  });
+
+  it('hides a header value echoed into a stack that spans lines', () => {
+    const log = createLogger('Run');
+    log.error(
+      'Unhandled promise rejection: TypeError: Headers.append: "Bearer drv_SECRET\nX" is an invalid header value.\n    at fetch',
+    );
+    const output = errorSpy.mock.calls[0][0] as string;
+    expect(output).not.toContain('drv_SECRET');
+    expect(output).toContain('"***" is an invalid header value.\n    at fetch');
+  });
 });
 
 describe('setLogLevel()', () => {
