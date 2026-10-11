@@ -208,6 +208,27 @@ scale:
     }
   });
 
+  // The yaml library hands a warning to process.emitWarning with a code frame of
+  // the line, straight to stderr. An unquoted password that starts with '!' is
+  // read as an unknown tag, so that printed the password.
+  it('does not echo a value YAML reads as an unknown tag', () => {
+    const yaml = VALID_YAML.replace('type: garmin', 'type: garmin\n    password: !hunter2');
+    vi.spyOn(fs, 'readFileSync').mockReturnValue(yaml);
+    vi.spyOn(fs, 'existsSync').mockImplementation((p) => !String(p).endsWith('.env'));
+    const emitted = vi.spyOn(process, 'emitWarning').mockImplementation(() => {});
+    const warned = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    loadYamlConfig('/test/config.yaml');
+
+    const printed = [...emitted.mock.calls, ...warned.mock.calls]
+      .map((args) => args.map(String).join(' '))
+      .join('\n');
+    expect(printed).not.toContain('hunter2');
+    expect(warned).toHaveBeenCalledWith(
+      expect.stringMatching(/YAML warning in \/test\/config\.yaml at line \d+.*key 'password'/),
+    );
+  });
+
   it('warns about an unknown key under ble and keeps loading (#318)', () => {
     const yamlWithTypo = VALID_YAML.replace(
       '  scale_mac:',

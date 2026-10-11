@@ -119,6 +119,30 @@ describe('runSetupCommand', () => {
     expect(code).toBe(1);
   });
 
+  // The yaml library's parse() warns through process.emitWarning with a code
+  // frame of the line, and an unquoted password starting with '!' is read as
+  // a tag, so loading an existing config printed that password.
+  it('does not print a password that YAML reads as a tag', async () => {
+    fs.writeFileSync(configPath, 'version: 1\nusers: []\npassword: !hunter2\n');
+    const emitted = vi.spyOn(process, 'emitWarning').mockImplementation(() => {});
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    await runSetupCommand(['--config', configPath], {
+      prompts: cancellingPrompts(/./),
+      platform,
+    });
+
+    const printed = [
+      ...emitted.mock.calls,
+      ...vi.mocked(console.log).mock.calls,
+      ...vi.mocked(console.warn).mock.calls,
+      ...vi.mocked(console.error).mock.calls,
+    ]
+      .map((args) => args.map(String).join(' '))
+      .join('\n');
+    expect(printed).not.toContain('hunter2');
+  });
+
   it('exits 0 for --help', async () => {
     expect(await runSetupCommand(['--help'])).toBe(0);
   });
